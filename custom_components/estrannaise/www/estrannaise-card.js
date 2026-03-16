@@ -5,7 +5,13 @@
  * with pharmacokinetic models ported from estrannaise.js.
  */
 
-const CARD_VERSION = '3.0.0';
+const CARD_VERSION = '4.1.0';
+
+// ── Color palette for multi-user series ──────────────────────────────────────
+const MULTI_USER_PALETTE = [
+  '#E91E63', '#2196F3', '#4CAF50', '#FF9800',
+  '#9C27B0', '#00BCD4', '#FF5722', '#607D8B',
+];
 
 // ── Color helpers for ha-form color_rgb selector ────────────────────────────
 
@@ -219,6 +225,7 @@ if (!customElements.get('estrannaise-card')) {
         show_danger_threshold: false,
         show_menstrual_cycle: false,
         show_dose_chevrons: true,
+        show_all_users: false,
         line_color: '#E91E63',
         target_color: 'rgba(33,150,243,0.13)',
         danger_color: 'rgba(244,67,54,0.10)',
@@ -234,10 +241,8 @@ if (!customElements.get('estrannaise-card')) {
       if ('hours_to_predict' in config && !('days_to_predict' in config)) {
         base.days_to_predict = Math.max(1, Math.round(config.hours_to_predict / 24));
       }
-      // Default prediction_color to line_color if not explicitly set
-      if (!config.prediction_color) {
-        base.prediction_color = base.line_color;
-      }
+      // Prediction and band colors are always derived from line_color
+      base.prediction_color = base.line_color;
       this.config = base;
     }
 
@@ -279,6 +284,26 @@ if (!customElements.get('estrannaise-card')) {
           font-weight: 300;
           color: var(--primary-text-color);
           margin-bottom: 12px;
+          display: flex;
+          justify-content: space-between;
+          flex-wrap: wrap;
+        }
+        .value.single-user {
+          justify-content: flex-start;
+        }
+        .value .e2-entry {
+          display: flex;
+          flex-direction: column;
+        }
+        .value .e2-label {
+          font-size: 12px;
+          font-weight: 500;
+          margin-bottom: 2px;
+        }
+        .value .e2-row {
+          display: flex;
+          align-items: baseline;
+          gap: 4px;
         }
         .value .unit {
           font-size: 14px;
@@ -286,7 +311,7 @@ if (!customElements.get('estrannaise-card')) {
         }
         .plot-container {
           width: 100%;
-          height: 300px;
+          min-height: 300px;
           position: relative;
           overflow: hidden;
         }
@@ -360,6 +385,22 @@ if (!customElements.get('estrannaise-card')) {
       this.shadowRoot.appendChild(card);
       card.querySelector('.header span').textContent = titleText;
       this._plotEl = card.querySelector('.plot-container');
+
+      // Watch for card-mod style injection and re-render when it happens
+      // (card-mod adds/modifies <style> elements in the shadow root)
+      this._styleObserver = new MutationObserver((mutations) => {
+        const styleChanged = mutations.some(m =>
+          [...m.addedNodes].some(n => n.nodeName === 'STYLE') ||
+          (m.type === 'characterData' && m.target.parentNode?.nodeName === 'STYLE')
+        );
+        if (styleChanged) {
+          this._lastEntityKey = null; // invalidate dedup cache
+          if (this._hass) this._update();
+        }
+      });
+      this._styleObserver.observe(this.shadowRoot, {
+        childList: true, subtree: true, characterData: true,
+      });
     }
 
     async _ensurePlotly() {
@@ -400,11 +441,50 @@ if (!customElements.get('estrannaise-card')) {
       const attrs = entity.attributes || {};
       const state = entity.state;
 
-      // Update header value
-      const valEl = this.shadowRoot.querySelector('.e2-value');
-      const unitEl = this.shadowRoot.querySelector('.unit');
-      if (valEl) valEl.textContent = state !== 'unknown' && state !== 'unavailable' ? state : '--';
-      if (unitEl) unitEl.textContent = attrs.units || 'pg/mL';
+      // Update header value(s) — one per user with color coding
+      const valueContainer = this.shadowRoot.querySelector('.value');
+      if (valueContainer) {
+        const users = attrs.users || {};
+        const entityUserId = attrs.user_id || 'default';
+        let userIds = Object.keys(users);
+        const units = attrs.units || 'pg/mL';
+
+        // Filter to entity's user only, unless show_all_users is enabled
+        if (!this.config.show_all_users) {
+          userIds = userIds.filter(uid => uid === entityUserId);
+          if (userIds.length === 0) userIds = [entityUserId];
+        }
+
+        // Entity-user-first color assignment (matches _renderPlot)
+        const cfgColor = (this.config.line_color || '#E91E63').toUpperCase();
+        const otherColors = MULTI_USER_PALETTE.filter(c => c.toUpperCase() !== cfgColor);
+        const userColors = {};
+        userColors[entityUserId] = cfgColor;
+        let colorIdx = 0;
+        for (const uid of userIds) {
+          if (uid === entityUserId) continue;
+          userColors[uid] = otherColors[colorIdx % otherColors.length];
+          colorIdx++;
+        }
+
+        if (userIds.length > 1) {
+          valueContainer.className = 'value';
+          valueContainer.innerHTML = '';
+          userIds.forEach((uid) => {
+            const userData = users[uid];
+            const color = userColors[uid] || cfgColor;
+            const e2 = userData?.current_e2 != null ? userData.current_e2 : '--';
+            const entry = document.createElement('span');
+            entry.className = 'e2-entry';
+            entry.innerHTML = `<span class="e2-label" style="color:${color}">${uid}</span>`
+              + `<span class="e2-row"><span class="e2-value" style="color:${color}">${e2}</span> <span class="unit">${units}</span></span>`;
+            valueContainer.appendChild(entry);
+          });
+        } else {
+          valueContainer.className = 'value single-user';
+          valueContainer.innerHTML = `<span class="e2-entry"><span class="e2-row"><span class="e2-value">${state !== 'unknown' && state !== 'unavailable' ? state : '--'}</span> <span class="unit">${units}</span></span></span>`;
+        }
+      }
 
       // Show suggested regimen if auto_regimen is enabled
       const suggestedEl = this.shadowRoot.querySelector('.suggested-regimen');
@@ -441,45 +521,9 @@ if (!customElements.get('estrannaise-card')) {
       this._renderPlot(attrs);
     }
 
-    _renderPlot(attrs) {
-      const pkParams = attrs.pk_parameters || {};
-      const patchWearDays = attrs.patch_wear_days || {};
-      const scalingFactor = attrs.scaling_factor || 1.0;
-      const scalingVariance = attrs.scaling_variance || 0.0;
-      const manualDoses = attrs.doses || [];
-      const bloodTests = attrs.blood_tests || [];
-      const targetRange = attrs.target_range || { lower: 100, upper: 200 };
-      const cycleData = attrs.menstrual_cycle_data || null;
-      const allConfigs = attrs.all_configs || [];
-      const units = attrs.units || 'pg/mL';
-
-      // Unit conversion factor
-      const cf = units === 'pmol/L' ? 3.6713 : 1.0;
-
-      const now = Date.now() / 1000;
-      const daysBack = this.config.days_to_show;
-      const daysForward = this.config.days_to_predict;
-      const tMin = now - daysBack * 86400;
-      const tMax = now + daysForward * 86400;
-
-      // ── Collect all dose events ────────────────────────────────────────
-      let allDoses = [];
-
-      // Manual doses from entity attributes (all entries)
-      for (const d of manualDoses) {
-        allDoses.push({
-          timestamp: d.timestamp,
-          model: d.model,
-          dose_mg: d.dose_mg,
-          source: 'manual',
-        });
-      }
-
-      // Automatic recurring doses from ALL entry configs
-      const suggestedRegimen = attrs.suggested_regimen || null;
-      const cycleFitRegimen = attrs.cycle_fit_regimen || null;
-
-      for (const cfg of allConfigs) {
+    _collectDosesForConfigs(configs, now, tMax) {
+      const doses = [];
+      for (const cfg of configs) {
         const cfgMode = cfg.mode || 'manual';
         if (cfgMode !== 'automatic' && cfgMode !== 'both') continue;
 
@@ -489,9 +533,11 @@ if (!customElements.get('estrannaise-card')) {
         let cfgInterval = cfg.interval_days || 7;
         const doseTime = cfg.dose_time || '08:00';
 
+        // Per-config regimen data (attached by coordinator)
+        const suggestedRegimen = cfg.suggested_regimen || null;
+        const cycleFitRegimen = cfg.cycle_fit_regimen || null;
+
         if (cfg.auto_regimen && cycleFitRegimen && cycleFitRegimen.schedules) {
-          // Multi-schedule cycle fit: generate per-schedule auto-doses
-          // Use local timezone for epoch day (matches Python coordinator)
           const nowDate0 = new Date(now * 1000);
           const localMid0 = new Date(nowDate0.getFullYear(), nowDate0.getMonth(), nowDate0.getDate());
           const epochDayNow = Math.floor(localMid0.getTime() / 86400000);
@@ -502,39 +548,29 @@ if (!customElements.get('estrannaise-card')) {
             hour = parseInt(parts[0], 10) || 8;
             minute = parseInt(parts[1], 10) || 0;
           }
-
           for (const sch of cycleFitRegimen.schedules) {
             const schIntervalSec = sch.interval_days * 86400;
             const schPhase = Math.floor(sch.phase_days);
-            const daysBack = ((cycleDayNow - schPhase) % 28 + 28) % 28;
-            const anchorDate = new Date(nowDate0.getFullYear(), nowDate0.getMonth(), nowDate0.getDate() - daysBack, hour, minute, 0, 0);
+            const db = ((cycleDayNow - schPhase) % 28 + 28) % 28;
+            const anchorDate = new Date(nowDate0.getFullYear(), nowDate0.getMonth(), nowDate0.getDate() - db, hour, minute, 0, 0);
             let t = anchorDate.getTime() / 1000;
             while (t <= now) t += schIntervalSec;
             while (t <= tMax) {
-              allDoses.push({
-                timestamp: t,
-                model: sch.model_key,
-                dose_mg: sch.dose_mg,
-                source: 'automatic',
-              });
+              doses.push({ timestamp: t, model: sch.model_key, dose_mg: sch.dose_mg, source: 'automatic' });
               t += schIntervalSec;
             }
           }
         } else {
-          // Single schedule
           if (cfg.auto_regimen && suggestedRegimen && !suggestedRegimen.schedules) {
             cfgDoseMg = suggestedRegimen.dose_mg || cfgDoseMg;
             cfgInterval = suggestedRegimen.interval_days || cfgInterval;
           }
-
           const intervalSec = cfgInterval * 86400;
           const modelKey = resolveModelKey(ester, method, cfgInterval);
           if (!modelKey) continue;
 
           const phaseDays = cfg.phase_days || 0;
           if (phaseDays > 0) {
-            // Phase-based anchoring (28-day cycle alignment)
-            // Use local timezone for epoch day (matches Python coordinator)
             const nowDate1 = new Date(now * 1000);
             const localMid1 = new Date(nowDate1.getFullYear(), nowDate1.getMonth(), nowDate1.getDate());
             const epochDayNow = Math.floor(localMid1.getTime() / 86400000);
@@ -545,171 +581,303 @@ if (!customElements.get('estrannaise-card')) {
               hour = parseInt(parts[0], 10) || 8;
               minute = parseInt(parts[1], 10) || 0;
             }
-            const daysBack = ((cycleDayNow - Math.floor(phaseDays)) % 28 + 28) % 28;
-            const anchorDate = new Date(nowDate1.getFullYear(), nowDate1.getMonth(), nowDate1.getDate() - daysBack, hour, minute, 0, 0);
+            const db = ((cycleDayNow - Math.floor(phaseDays)) % 28 + 28) % 28;
+            const anchorDate = new Date(nowDate1.getFullYear(), nowDate1.getMonth(), nowDate1.getDate() - db, hour, minute, 0, 0);
             let t = anchorDate.getTime() / 1000;
             while (t <= now) t += intervalSec;
             while (t <= tMax) {
-              allDoses.push({
-                timestamp: t,
-                model: modelKey,
-                dose_mg: cfgDoseMg,
-                source: 'automatic',
-              });
+              doses.push({ timestamp: t, model: modelKey, dose_mg: cfgDoseMg, source: 'automatic' });
               t += intervalSec;
             }
           } else {
-            // Standard anchoring (today's dose time)
             const anchor = alignToTimeOfDay(now, doseTime, intervalSec);
             let t = anchor + intervalSec;
             while (t <= tMax) {
-              allDoses.push({
-                timestamp: t,
-                model: modelKey,
-                dose_mg: cfgDoseMg,
-                source: 'automatic',
-              });
+              doses.push({ timestamp: t, model: modelKey, dose_mg: cfgDoseMg, source: 'automatic' });
               t += intervalSec;
             }
           }
         }
       }
+      return doses;
+    }
 
-      // Card YAML override/supplement doses (future only, for prediction)
-      if (this.config.doses && Array.isArray(this.config.doses)) {
-        for (const cardDose of this.config.doses) {
-          const intervalSec = (cardDose.interval_days || 7) * 86400;
-          let t = now + intervalSec;
-          while (t <= tMax) {
-            allDoses.push({
-              timestamp: t,
-              model: cardDose.model,
-              dose_mg: cardDose.dose,
-              source: 'card_yaml',
-            });
-            t += intervalSec;
-          }
-        }
-      }
+    _renderPlot(attrs) {
+      const pkParams = attrs.pk_parameters || {};
+      const patchWearDays = attrs.patch_wear_days || {};
+      const targetRange = attrs.target_range || { lower: 100, upper: 200 };
+      const cycleData = attrs.menstrual_cycle_data || null;
+      const units = attrs.units || 'pg/mL';
+      const esters = attrs.esters || {};
+      const cf = units === 'pmol/L' ? 3.6713 : 1.0;
 
-      // ── Compute E2 curve ───────────────────────────────────────────────
+      const now = Date.now() / 1000;
+      const daysBack = this.config.days_to_show;
+      const daysForward = this.config.days_to_predict;
+      const tMin = now - daysBack * 86400;
+      const tMax = now + daysForward * 86400;
       const numPoints = 500;
       const step = (tMax - tMin) / (numPoints - 1);
-      const histX = [], histY = [], predX = [], predY = [];
-      const bandUpperX = [], bandUpperY = [], bandLowerX = [], bandLowerY = [];
 
-      // Blood test baseline (zero-state handling only)
-      // When the PK model predicts ~0 at all blood test times, multiplicative
-      // scaling can't work. In that case, the blood test level is used as a
-      // decaying offset — it represents E2 from sources the model can't
-      // explain (endogenous production, unlogged doses, etc.).
-      // Decays exponentially (λ=0.02/day, ~35d half-life) so old tests fade.
-      const baselineE2 = attrs.baseline_e2 || 0;
-      const baselineTestTs = attrs.baseline_test_ts || 0;
-      const baselineDecay = (tSec) => {
-        const ageDays = (tSec - baselineTestTs) / 86400;
-        return baselineE2 * Math.exp(-0.02 * Math.max(0, ageDays));
-      };
+      // ── Build per-user data ────────────────────────────────────────────
+      const usersRaw = attrs.users || {};
+      const entityUserId = attrs.user_id || 'default';
+      let userIds = Object.keys(usersRaw);
 
-      // Confidence band multipliers (if variance > 0 and enough blood tests)
-      const showBands = scalingVariance > 0 && bloodTests.length >= 2;
-      const sqrtVar = Math.sqrt(scalingVariance);
+      // Fallback: if no per-user data, build single-user from flat attrs
+      if (userIds.length === 0) {
+        userIds = [entityUserId];
+        usersRaw[entityUserId] = {
+          user_id: entityUserId,
+          doses: attrs.doses || [],
+          blood_tests: attrs.blood_tests || [],
+          scaling_factor: attrs.scaling_factor || 1.0,
+          scaling_variance: attrs.scaling_variance || 0.0,
+          configs: attrs.all_configs || [],
+          baseline_e2: attrs.baseline_e2 || 0,
+          baseline_test_ts: attrs.baseline_test_ts || 0,
+        };
+      }
 
-      for (let i = 0; i < numPoints; i++) {
-        const t = tMin + i * step;
-        const tDate = new Date(t * 1000);
-        let e2raw = 0;
-        for (const dose of allDoses) {
-          const tDays = (t - dose.timestamp) / 86400;
-          e2raw += computeE2(tDays, dose.dose_mg, dose.model, pkParams, patchWearDays);
+      // Filter to entity's user only, unless show_all_users is enabled
+      if (!this.config.show_all_users) {
+        userIds = userIds.filter(uid => uid === entityUserId);
+        if (userIds.length === 0) userIds = [entityUserId];
+      }
+
+      // Assign colors: entity's user always gets line_color, others get palette
+      // CSS custom properties (--estrannaise-color-<uid>) override if set via card-mod
+      const userColors = {};
+      const cfgColor = (this.config.line_color || '#E91E63').toUpperCase();
+      const otherColors = MULTI_USER_PALETTE.filter(c => c.toUpperCase() !== cfgColor);
+      const hostStyles = getComputedStyle(this);
+      userColors[entityUserId] = cfgColor;
+      let colorIdx = 0;
+      for (const uid of userIds) {
+        if (uid !== entityUserId) {
+          userColors[uid] = otherColors[colorIdx % otherColors.length];
+          colorIdx++;
         }
-        let e2 = e2raw * scalingFactor * cf;
+        // Allow card-mod override via --estrannaise-color-<uid>
+        const cssOverride = hostStyles.getPropertyValue(`--estrannaise-color-${uid}`).trim();
+        if (cssOverride) userColors[uid] = cssOverride;
+      }
 
-        // Add decaying baseline offset (after blood test time)
-        if (baselineE2 > 0 && t >= baselineTestTs) {
-          e2 += baselineDecay(t) * cf;
+      const multiUser = userIds.length > 1;
+      const traces = [];
+      const traceUserMap = []; // parallel to traces: user ID per trace (for post-render CSS classes)
+      const allMergedDoses = []; // for spike interaction
+      const allUserDoseArrays = {}; // uid -> doses array (for spike E2 calc)
+      let globalMaxY = (targetRange.upper || 200) * cf;
+
+      // ── Per-user traces ────────────────────────────────────────────────
+      for (const uid of userIds) {
+        const traceStartIdx = traces.length;
+        const userData = usersRaw[uid];
+        const userColor = userColors[uid];
+        const userConfigs = userData.configs || [];
+        const scalingFactor = userData.scaling_factor || 1.0;
+        const scalingVariance = userData.scaling_variance || 0.0;
+        const baselineE2 = userData.baseline_e2 || 0;
+        const baselineTestTs = userData.baseline_test_ts || 0;
+
+        // Collect doses: manual + auto from configs
+        let userDoses = [];
+        for (const d of (userData.doses || [])) {
+          userDoses.push({ timestamp: d.timestamp, model: d.model, dose_mg: d.dose_mg, source: 'manual' });
         }
+        userDoses.push(...this._collectDosesForConfigs(userConfigs, now, tMax));
 
-        if (t <= now) {
-          histX.push(tDate);
-          histY.push(Math.max(0, e2));
-        } else {
-          predX.push(tDate);
-          predY.push(Math.max(0, e2));
-        }
-
-        if (showBands) {
-          const upper = e2raw * (scalingFactor + 2 * sqrtVar) * cf;
-          const lower = e2raw * Math.max(0, scalingFactor - 2 * sqrtVar) * cf;
-          if (t <= now) {
-            bandUpperX.push(tDate);
-            bandUpperY.push(Math.max(0, upper));
-            bandLowerX.push(tDate);
-            bandLowerY.push(Math.max(0, lower));
+        // Card YAML override doses (first user only)
+        if (uid === userIds[0] && this.config.doses && Array.isArray(this.config.doses)) {
+          for (const cardDose of this.config.doses) {
+            const intervalSec = (cardDose.interval_days || 7) * 86400;
+            let t = now + intervalSec;
+            while (t <= tMax) {
+              userDoses.push({ timestamp: t, model: cardDose.model, dose_mg: cardDose.dose, source: 'card_yaml' });
+              t += intervalSec;
+            }
           }
         }
-      }
 
-      // Ensure continuity: add current point to both traces
-      const nowDate = new Date(now * 1000);
-      let e2NowRaw = 0;
-      for (const dose of allDoses) {
-        const tDays = (now - dose.timestamp) / 86400;
-        e2NowRaw += computeE2(tDays, dose.dose_mg, dose.model, pkParams, patchWearDays);
-      }
-      let e2Now = e2NowRaw * scalingFactor * cf;
-      if (baselineE2 > 0 && now >= baselineTestTs) e2Now += baselineDecay(now) * cf;
-      histX.push(nowDate);
-      histY.push(Math.max(0, e2Now));
-      predX.unshift(nowDate);
-      predY.unshift(Math.max(0, e2Now));
+        allUserDoseArrays[uid] = userDoses;
 
-      // ── Build Plotly traces ────────────────────────────────────────────
-      const traces = [];
+        // Compute E2 curve for this user
+        const histX = [], histY = [], predX = [], predY = [];
+        const bandUpperX = [], bandUpperY = [], bandLowerX = [], bandLowerY = [];
 
-      // Confidence band (behind the main line)
-      if (showBands && bandUpperX.length > 0) {
-        // Parse line_color to create semi-transparent version
-        const bandColor = this.config.line_color.startsWith('#')
-          ? this.config.line_color + '20'
-          : 'rgba(233,30,99,0.12)';
+        const baselineDecay = (tSec) => {
+          const ageDays = (tSec - baselineTestTs) / 86400;
+          return baselineE2 * Math.exp(-0.02 * Math.max(0, ageDays));
+        };
+
+        const userBloodTests = userData.blood_tests || [];
+        const showBands = scalingVariance > 0 && userBloodTests.length >= 2;
+        const sqrtVar = Math.sqrt(scalingVariance);
+
+        for (let i = 0; i < numPoints; i++) {
+          const t = tMin + i * step;
+          const tDate = new Date(t * 1000);
+          let e2raw = 0;
+          for (const dose of userDoses) {
+            const tDays = (t - dose.timestamp) / 86400;
+            e2raw += computeE2(tDays, dose.dose_mg, dose.model, pkParams, patchWearDays);
+          }
+          let e2 = e2raw * scalingFactor * cf;
+          if (baselineE2 > 0 && t >= baselineTestTs) e2 += baselineDecay(t) * cf;
+
+          if (t <= now) {
+            histX.push(tDate); histY.push(Math.max(0, e2));
+          } else {
+            predX.push(tDate); predY.push(Math.max(0, e2));
+          }
+
+          if (showBands) {
+            const upper = e2raw * (scalingFactor + 2 * sqrtVar) * cf;
+            const lower = e2raw * Math.max(0, scalingFactor - 2 * sqrtVar) * cf;
+            if (t <= now) {
+              bandUpperX.push(tDate); bandUpperY.push(Math.max(0, upper));
+              bandLowerX.push(tDate); bandLowerY.push(Math.max(0, lower));
+            }
+          }
+        }
+
+        // Ensure continuity at "now"
+        const nowDate = new Date(now * 1000);
+        let e2NowRaw = 0;
+        for (const dose of userDoses) {
+          const tDays = (now - dose.timestamp) / 86400;
+          e2NowRaw += computeE2(tDays, dose.dose_mg, dose.model, pkParams, patchWearDays);
+        }
+        let e2Now = e2NowRaw * scalingFactor * cf;
+        if (baselineE2 > 0 && now >= baselineTestTs) e2Now += baselineDecay(now) * cf;
+        histX.push(nowDate); histY.push(Math.max(0, e2Now));
+        predX.unshift(nowDate); predY.unshift(Math.max(0, e2Now));
+
+        globalMaxY = Math.max(globalMaxY, ...histY, ...predY);
+        if (showBands) globalMaxY = Math.max(globalMaxY, ...bandUpperY);
+
+        const userLabel = multiUser ? ` (${uid})` : '';
+
+        // Confidence band (semi-transparent, same color as line)
+        if (showBands && bandUpperX.length > 0) {
+          const [r, g, b] = hexToRgb(userColor);
+          const bandColor = `rgba(${r},${g},${b},0.12)`;
+          traces.push({
+            x: bandUpperX.concat([...bandLowerX].reverse()),
+            y: bandUpperY.concat([...bandLowerY].reverse()),
+            fill: 'toself', fillcolor: bandColor, line: { width: 0 },
+            type: 'scatter', mode: 'lines',
+            name: `Confidence band${userLabel}`, hoverinfo: 'skip', showlegend: false,
+          });
+        }
+
+        // Historical E2 (solid line) — this trace represents the user in the legend
         traces.push({
-          x: bandUpperX.concat([...bandLowerX].reverse()),
-          y: bandUpperY.concat([...bandLowerY].reverse()),
-          fill: 'toself',
-          fillcolor: bandColor,
-          line: { width: 0 },
-          type: 'scatter',
-          mode: 'lines',
-          name: 'Confidence band',
-          hoverinfo: 'skip',
-          showlegend: true,
+          x: histX, y: histY, type: 'scatter', mode: 'lines+markers',
+          name: multiUser ? uid : 'Estimated E2',
+          legendgroup: uid,
+          line: { color: userColor, width: 2.5 },
+          marker: { size: 2.5, color: userColor, maxdisplayed: 60 },
+          hovertemplate: `<b>%{y:.0f}</b> ${units}${userLabel}<br>%{x}<extra></extra>`,
         });
+
+        // Projected E2 (dotted line, same color)
+        traces.push({
+          x: predX, y: predY, type: 'scatter', mode: 'lines+markers',
+          name: `Projected E2${userLabel}`,
+          legendgroup: uid, showlegend: false,
+          line: { color: userColor, width: 2, dash: 'dot' },
+          marker: { size: 2.5, color: userColor, maxdisplayed: 30 },
+          hovertemplate: `<b>%{y:.0f}</b> ${units} (projected)${userLabel}<br>%{x}<extra></extra>`,
+        });
+
+        // Blood test markers for this user
+        if (userBloodTests.length > 0) {
+          const testX = [], testY = [], testText = [];
+          for (const test of userBloodTests) {
+            if (test.timestamp < tMin || test.timestamp > tMax) continue;
+            testX.push(new Date(test.timestamp * 1000));
+            testY.push(test.level_pg_ml * cf);
+            const safeNotes = test.notes
+              ? test.notes.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+              : '';
+            testText.push(
+              `<b>${(test.level_pg_ml * cf).toFixed(0)}</b> ${units}${userLabel}` +
+              (safeNotes ? `<br>${safeNotes}` : '') +
+              `<br>ID: ${test.id}`
+            );
+          }
+          if (testX.length > 0) {
+            traces.push({
+              x: testX, y: testY, type: 'scatter', mode: 'markers',
+              name: `Blood tests${userLabel}`,
+              legendgroup: uid, showlegend: false,
+              marker: { color: userColor, size: 10, symbol: 'circle', line: { color: '#fff', width: 2 } },
+              hovertemplate: '%{text}<extra></extra>', text: testText,
+            });
+          }
+        }
+
+        // Dose chevrons for this user
+        if (this.config.show_dose_chevrons !== false) {
+          const MERGE_WINDOW = 3600;
+          const merged = [];
+          const sorted = [...userDoses].sort((a, b) => a.timestamp - b.timestamp);
+          for (const dose of sorted) {
+            const last = merged.length > 0 ? merged[merged.length - 1] : null;
+            if (last && Math.abs(dose.timestamp - last.timestamp) < MERGE_WINDOW && dose.model === last.model) {
+              last.dose_mg += dose.dose_mg;
+              if (dose.source === 'manual') last.source = 'manual';
+            } else {
+              merged.push({ ...dose });
+            }
+          }
+          allMergedDoses.push(...merged.map(d => ({ ...d, _uid: uid, _color: userColor })));
+
+          const manualX = [], manualY = [], manualText = [];
+          const autoX = [], autoY = [], autoText = [];
+          for (const dose of merged) {
+            if (dose.timestamp < tMin || dose.timestamp > tMax) continue;
+            const x = new Date(dose.timestamp * 1000);
+            const modelParts = (dose.model || '').split(' ');
+            const esterName = esters[modelParts[0]] || dose.model;
+            const label = `${dose.dose_mg}mg ${esterName}${userLabel}`;
+            if (dose.source === 'manual') {
+              manualX.push(x); manualY.push(0); manualText.push(label);
+            } else {
+              autoX.push(x); autoY.push(0); autoText.push(label + ' (scheduled)');
+            }
+          }
+          if (manualX.length > 0) {
+            traces.push({
+              x: manualX, y: manualY, type: 'scatter', mode: 'markers',
+              name: `Manual doses${userLabel}`,
+              legendgroup: uid, showlegend: false,
+              marker: { color: userColor, size: 12, symbol: 'triangle-up' },
+              hovertemplate: '<b>%{text}</b><br>%{x|%b %d %H:%M}<extra></extra>',
+              text: manualText, cliponaxis: false,
+            });
+          }
+          if (autoX.length > 0) {
+            traces.push({
+              x: autoX, y: autoY, type: 'scatter', mode: 'markers',
+              name: `Scheduled doses${userLabel}`,
+              legendgroup: uid, showlegend: false,
+              marker: { color: userColor, size: 10, symbol: 'triangle-up', opacity: 0.4 },
+              hovertemplate: '<b>%{text}</b><br>%{x|%b %d %H:%M}<extra></extra>',
+              text: autoText, cliponaxis: false,
+            });
+          }
+        }
+
+        // Tag all traces added for this user
+        for (let i = traceStartIdx; i < traces.length; i++) {
+          traceUserMap[i] = uid;
+        }
       }
 
-      // Historical E2 (solid line with dots)
-      traces.push({
-        x: histX,
-        y: histY,
-        type: 'scatter',
-        mode: 'lines+markers',
-        name: 'Estimated E2',
-        line: { color: this.config.line_color, width: 2.5 },
-        marker: { size: 2.5, color: this.config.line_color, maxdisplayed: 60 },
-        hovertemplate: '<b>%{y:.0f}</b> ' + units + '<br>%{x}<extra></extra>',
-      });
-
-      // Predicted E2 (dashed line with dots)
-      traces.push({
-        x: predX,
-        y: predY,
-        type: 'scatter',
-        mode: 'lines+markers',
-        name: 'Projected E2',
-        line: { color: this.config.prediction_color, width: 2, dash: 'dot' },
-        marker: { size: 2.5, color: this.config.prediction_color, maxdisplayed: 30 },
-        hovertemplate: '<b>%{y:.0f}</b> ' + units + ' (projected)<br>%{x}<extra></extra>',
-      });
+      // ── Shared traces ──────────────────────────────────────────────────
 
       // Target range (shaded band)
       if (this.config.show_target_range) {
@@ -718,32 +886,23 @@ if (!customElements.get('estrannaise-card')) {
         traces.push({
           x: [new Date(tMin * 1000), new Date(tMax * 1000), new Date(tMax * 1000), new Date(tMin * 1000)],
           y: [lower, lower, upper, upper],
-          fill: 'toself',
-          fillcolor: this.config.target_color,
-          line: { width: 0 },
-          type: 'scatter',
-          mode: 'lines',
+          fill: 'toself', fillcolor: this.config.target_color, line: { width: 0 },
+          type: 'scatter', mode: 'lines',
           name: `Target (${targetRange.lower}-${targetRange.upper} pg/mL)`,
-          hoverinfo: 'skip',
-          showlegend: true,
+          hoverinfo: 'skip', showlegend: false,
         });
       }
 
-      // Danger threshold (>500 pg/mL shaded band)
+      // Danger threshold
       if (this.config.show_danger_threshold) {
         const dangerLower = 500 * cf;
-        const dangerUpper = 99999 * cf; // extend to top of chart
+        const dangerUpper = 99999 * cf;
         traces.push({
           x: [new Date(tMin * 1000), new Date(tMax * 1000), new Date(tMax * 1000), new Date(tMin * 1000)],
           y: [dangerLower, dangerLower, dangerUpper, dangerUpper],
-          fill: 'toself',
-          fillcolor: this.config.danger_color,
-          line: { width: 0 },
-          type: 'scatter',
-          mode: 'lines',
-          name: 'Danger (>500 pg/mL)',
-          hoverinfo: 'skip',
-          showlegend: true,
+          fill: 'toself', fillcolor: this.config.danger_color, line: { width: 0 },
+          type: 'scatter', mode: 'lines',
+          name: 'Danger (>500 pg/mL)', hoverinfo: 'skip', showlegend: false,
         });
       }
 
@@ -755,9 +914,8 @@ if (!customElements.get('estrannaise-card')) {
         const cycleX = [], cycleP5 = [], cycleP95 = [], cycleMean = [];
         for (let i = 0; i < numPoints; i++) {
           const t = tMin + i * step;
-          const tDate = new Date(t * 1000);
           const dayInCycle = (((t / 86400) % 28) + 28) % 28;
-          cycleX.push(tDate);
+          cycleX.push(new Date(t * 1000));
           cycleMean.push(splineMean.at(dayInCycle) * cf);
           cycleP5.push(splineP5.at(dayInCycle) * cf);
           cycleP95.push(splineP95.at(dayInCycle) * cf);
@@ -765,133 +923,16 @@ if (!customElements.get('estrannaise-card')) {
         traces.push({
           x: cycleX.concat([...cycleX].reverse()),
           y: cycleP5.concat([...cycleP95].reverse()),
-          fill: 'toself',
-          fillcolor: this.config.cycle_color,
-          line: { width: 0 },
-          type: 'scatter',
-          mode: 'lines',
-          name: 'Menstrual cycle (p5-p95)',
-          hoverinfo: 'skip',
-          showlegend: true,
+          fill: 'toself', fillcolor: this.config.cycle_color, line: { width: 0 },
+          type: 'scatter', mode: 'lines',
+          name: 'Menstrual cycle (p5-p95)', hoverinfo: 'skip', showlegend: false,
         });
         traces.push({
-          x: cycleX,
-          y: cycleMean,
-          type: 'scatter',
-          mode: 'lines',
+          x: cycleX, y: cycleMean, type: 'scatter', mode: 'lines',
           name: 'Cycle mean',
           line: { color: 'rgba(156,39,176,0.4)', width: 1, dash: 'dash' },
           hovertemplate: '<b>%{y:.0f}</b> ' + units + ' (cycle)<extra></extra>',
         });
-      }
-
-      // Blood test markers
-      if (bloodTests.length > 0) {
-        const testX = [], testY = [], testText = [];
-        for (const test of bloodTests) {
-          const ts = test.timestamp;
-          if (ts < tMin || ts > tMax) continue;
-          testX.push(new Date(ts * 1000));
-          testY.push(test.level_pg_ml * cf);
-          const safeNotes = test.notes
-            ? test.notes.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-            : '';
-          testText.push(
-            `<b>${(test.level_pg_ml * cf).toFixed(0)}</b> ${units}` +
-            (safeNotes ? `<br>${safeNotes}` : '') +
-            `<br>ID: ${test.id}`
-          );
-        }
-        if (testX.length > 0) {
-          traces.push({
-            x: testX,
-            y: testY,
-            type: 'scatter',
-            mode: 'markers',
-            name: 'Blood tests',
-            marker: {
-              color: this.config.test_marker_color,
-              size: 10,
-              symbol: 'circle',
-              line: { color: '#fff', width: 2 },
-            },
-            hovertemplate: '%{text}<extra></extra>',
-            text: testText,
-          });
-        }
-      }
-
-      // Merge coincident doses of the same ester for display (sum dose_mg)
-      const esters = attrs.esters || {};
-      const MERGE_WINDOW = 3600; // seconds — doses within 1 hour count as same time
-      const mergedDoses = [];
-      const sorted = [...allDoses].sort((a, b) => a.timestamp - b.timestamp);
-      for (const dose of sorted) {
-        const last = mergedDoses.length > 0 ? mergedDoses[mergedDoses.length - 1] : null;
-        if (last && Math.abs(dose.timestamp - last.timestamp) < MERGE_WINDOW
-            && dose.model === last.model) {
-          last.dose_mg += dose.dose_mg;
-          if (dose.source === 'manual') last.source = 'manual';
-        } else {
-          mergedDoses.push({ ...dose });
-        }
-      }
-
-      // Dose event chevrons at bottom of chart (merged display doses)
-      if (this.config.show_dose_chevrons !== false) {
-        const manualChevX = [], manualChevY = [], manualChevText = [];
-        const autoChevX = [], autoChevY = [], autoChevText = [];
-        for (const dose of mergedDoses) {
-          if (dose.timestamp < tMin || dose.timestamp > tMax) continue;
-          const x = new Date(dose.timestamp * 1000);
-          const modelParts = (dose.model || '').split(' ');
-          const esterName = esters[modelParts[0]] || dose.model;
-          const label = `${dose.dose_mg}mg ${esterName}`;
-          if (dose.source === 'manual') {
-            manualChevX.push(x);
-            manualChevY.push(0);
-            manualChevText.push(label);
-          } else {
-            autoChevX.push(x);
-            autoChevY.push(0);
-            autoChevText.push(label + ' (scheduled)');
-          }
-        }
-        if (manualChevX.length > 0) {
-          traces.push({
-            x: manualChevX,
-            y: manualChevY,
-            type: 'scatter',
-            mode: 'markers',
-            name: 'Manual doses',
-            marker: {
-              color: this.config.dose_marker_color,
-              size: 12,
-              symbol: 'triangle-up',
-            },
-            hovertemplate: '<b>%{text}</b><br>%{x|%b %d %H:%M}<extra></extra>',
-            text: manualChevText,
-            cliponaxis: false,
-          });
-        }
-        if (autoChevX.length > 0) {
-          traces.push({
-            x: autoChevX,
-            y: autoChevY,
-            type: 'scatter',
-            mode: 'markers',
-            name: 'Scheduled doses',
-            marker: {
-              color: this.config.dose_marker_color,
-              size: 10,
-              symbol: 'triangle-up',
-              opacity: 0.4,
-            },
-            hovertemplate: '<b>%{text}</b><br>%{x|%b %d %H:%M}<extra></extra>',
-            text: autoChevText,
-            cliponaxis: false,
-          });
-        }
       }
 
       // ── Layout ─────────────────────────────────────────────────────────
@@ -902,67 +943,45 @@ if (!customElements.get('estrannaise-card')) {
       const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
       const bgColor = 'rgba(0,0,0,0)';
       const nowLineColor = isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.3)';
+      const yAxisMax = globalMaxY * 1.15;
+      const nowDate = new Date(now * 1000);
 
-      // Compute y-axis range for "Now" line and layout
-      const dataMax = Math.max(...histY, ...predY, (targetRange.upper || 200) * cf);
-      const yAxisMax = dataMax * 1.15;
-
-      // "Now" vertical dotted line (as trace to render within plot area)
+      // "Now" vertical dotted line
       traces.push({
-        x: [nowDate, nowDate, nowDate],
-        y: [0, yAxisMax, yAxisMax],
-        type: 'scatter',
-        mode: 'lines+text',
-        name: 'Now',
+        x: [nowDate, nowDate, nowDate], y: [0, yAxisMax, yAxisMax],
+        type: 'scatter', mode: 'lines+text', name: 'Now',
         line: { color: nowLineColor, width: 1.5, dash: 'dot' },
-        text: ['', '', 'Now'],
-        textposition: 'top center',
+        text: ['', '', 'Now'], textposition: 'top center',
         textfont: { color: nowLineColor, size: 10 },
-        hoverinfo: 'skip',
-        showlegend: false,
-        cliponaxis: false,
+        hoverinfo: 'skip', showlegend: false, cliponaxis: false,
       });
 
+      const chartHeight = 300;
+      this._chartHeight = chartHeight;
       const layout = {
-        autosize: true,
-        height: 300,
+        autosize: true, height: chartHeight,
         margin: { l: 50, r: 20, t: 20, b: 40 },
-        paper_bgcolor: bgColor,
-        plot_bgcolor: bgColor,
+        paper_bgcolor: bgColor, plot_bgcolor: bgColor,
         font: { color: textColor, size: 12 },
         xaxis: {
-          type: 'date',
-          gridcolor: gridColor,
-          linecolor: gridColor,
+          type: 'date', gridcolor: gridColor, linecolor: gridColor,
           tickformat: '%b %d\n%H:%M',
           range: [new Date(tMin * 1000), new Date(tMax * 1000)],
           fixedrange: true,
         },
         yaxis: {
-          title: units,
-          gridcolor: gridColor,
-          linecolor: gridColor,
-          range: [0, yAxisMax],
-          fixedrange: true,
+          title: units, gridcolor: gridColor, linecolor: gridColor,
+          range: [0, yAxisMax], fixedrange: true,
         },
-        showlegend: false,
-        annotations: [],
-        hovermode: 'closest',
-        hoverdistance: 50,
-        dragmode: false,
+        showlegend: false, annotations: [],
+        hovermode: 'closest', hoverdistance: 50, dragmode: false,
       };
 
-      const plotConfig = {
-        displayModeBar: false,
-        responsive: true,
-        scrollZoom: false,
-      };
+      const plotConfig = { displayModeBar: false, responsive: true, scrollZoom: false };
 
       // ── Render ─────────────────────────────────────────────────────────
       if (this._plotEl) {
-        if (this._plotEl.querySelector('.loading')) {
-          this._plotEl.innerHTML = '';
-        }
+        if (this._plotEl.querySelector('.loading')) this._plotEl.innerHTML = '';
         const plotDiv = this._plotEl.querySelector('.js-plotly-plot') || this._plotEl;
 
         if (this._plotEl.querySelector('.js-plotly-plot')) {
@@ -973,21 +992,45 @@ if (!customElements.get('estrannaise-card')) {
 
         if (!this._resizeObserver) {
           this._resizeObserver = new ResizeObserver(() => {
-            if (this._plotEl && window.Plotly) {
-              window.Plotly.relayout(this._plotEl, { height: 300 });
-            }
+            if (this._plotEl && window.Plotly) window.Plotly.relayout(this._plotEl, { height: this._chartHeight || 300 });
           });
           this._resizeObserver.observe(this._plotEl);
         }
 
-        // ── Dose spike lines (proximity-triggered vertical lines at dose positions) ──
+        // Tag SVG trace groups with per-user CSS classes for card-mod targeting
+        this._applyTraceClasses(traceUserMap);
+
+        // Dose spike lines
         if (this.config.show_dose_chevrons !== false) {
-          this._setupDoseSpikes(layout.margin, tMin, tMax, yAxisMax, mergedDoses, allDoses, pkParams, patchWearDays, scalingFactor, cf, units, baselineE2, baselineTestTs, now, esters);
+          this._setupDoseSpikes(layout.margin, tMin, tMax, yAxisMax, allMergedDoses, allUserDoseArrays, pkParams, patchWearDays, cf, units, now, esters, usersRaw);
         }
       }
     }
 
-    _setupDoseSpikes(margin, tMin, tMax, yMax, displayDoses, allDoses, pkParams, patchWearDays, scalingFactor, cf, units, baselineE2, baselineTestTs, nowSec, esters) {
+    _applyTraceClasses(traceUserMap) {
+      const plotEl = this._plotEl;
+      if (!plotEl) return;
+      // Plotly SVG trace groups live in g.scatterlayer > g.trace elements
+      const traceGroups = plotEl.querySelectorAll('.scatterlayer > .trace');
+      traceGroups.forEach((g, idx) => {
+        // Remove any previous estrannaise-user-* classes
+        const toRemove = [];
+        g.classList.forEach(c => { if (c.startsWith('estrannaise-user-')) toRemove.push(c); });
+        toRemove.forEach(c => g.classList.remove(c));
+        g.removeAttribute('data-estrannaise-user');
+
+        const uid = traceUserMap[idx];
+        if (uid) {
+          const safeUid = uid.replace(/[^a-zA-Z0-9_-]/g, '_');
+          g.classList.add(`estrannaise-user-${safeUid}`);
+          g.setAttribute('data-estrannaise-user', uid);
+        } else {
+          g.classList.add('estrannaise-shared');
+        }
+      });
+    }
+
+    _setupDoseSpikes(margin, tMin, tMax, yMax, displayDoses, allUserDoseArrays, pkParams, patchWearDays, cf, units, nowSec, esters, usersRaw) {
       if (!this._plotEl) return;
 
       // Remove old spike elements
@@ -1009,13 +1052,20 @@ if (!customElements.get('estrannaise-card')) {
       for (const dose of displayDoses) {
         if (dose.timestamp < tMin || dose.timestamp > tMax) continue;
 
+        const uid = dose._uid || 'default';
+        const userData = usersRaw[uid] || {};
+        const userDoses = allUserDoseArrays[uid] || [];
+        const scalingFactor = userData.scaling_factor || 1.0;
+        const baselineE2 = userData.baseline_e2 || 0;
+        const baselineTestTs = userData.baseline_test_ts || 0;
+
         // X pixel position
         const xFrac = (dose.timestamp - tMin) / (tMax - tMin);
         const xPx = plotLeft + xFrac * plotW;
 
-        // Compute E2 at this dose's time (sum of all contributions)
+        // Compute E2 at this dose's time from this user's doses
         let e2raw = 0;
-        for (const d of allDoses) {
+        for (const d of userDoses) {
           const tDays = (dose.timestamp - d.timestamp) / 86400;
           e2raw += computeE2(tDays, d.dose_mg, d.model, pkParams, patchWearDays);
         }
@@ -1030,7 +1080,6 @@ if (!customElements.get('estrannaise-card')) {
         const yFrac = Math.min(e2 / yMax, 1);
         const yPx = plotBottom - yFrac * plotH;
 
-        // Dose label (dosage, ester, time only)
         const modelParts = (dose.model || '').split(' ');
         const esterName = (esters || {})[modelParts[0]] || dose.model;
         const doseLabel = `${dose.dose_mg}mg ${esterName}`;
@@ -1038,16 +1087,15 @@ if (!customElements.get('estrannaise-card')) {
         const dateStr = dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
         const timeStr = dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
-        // Create spike line element (bottom of plot → trace)
         const spike = document.createElement('div');
         spike.className = 'dose-spike';
         spike.style.left = xPx + 'px';
         spike.style.top = yPx + 'px';
         spike.style.height = (plotBottom - yPx) + 'px';
+        if (dose._color) spike.style.borderLeftColor = dose._color;
         this._plotEl.appendChild(spike);
         this._spikeEls.push(spike);
 
-        // Create label element
         const label = document.createElement('div');
         label.className = 'dose-spike-label';
         label.textContent = `${doseLabel}\n${dateStr} ${timeStr}`;
@@ -1059,10 +1107,8 @@ if (!customElements.get('estrannaise-card')) {
         this._spikeDoses.push({ xPx, spike, label });
       }
 
-      // Store plot bounds for mousemove
       this._spikeBounds = { plotLeft, plotRight, plotTop, plotBottom };
 
-      // Bind events (re-bind if plotEl changed, e.g. after reconnect)
       if (!this._spikeBound || this._spikeTarget !== this._plotEl) {
         this._spikeBound = true;
         this._spikeTarget = this._plotEl;
@@ -1112,6 +1158,10 @@ if (!customElements.get('estrannaise-card')) {
       if (this._resizeObserver) {
         this._resizeObserver.disconnect();
         this._resizeObserver = null;
+      }
+      if (this._styleObserver) {
+        this._styleObserver.disconnect();
+        this._styleObserver = null;
       }
       if (this._plotEl && window.Plotly) {
         window.Plotly.purge(this._plotEl);
@@ -1177,8 +1227,8 @@ if (!customElements.get('estrannaise-card-editor')) {
         show_danger_threshold: !!this.config.show_danger_threshold,
         show_menstrual_cycle: !!this.config.show_menstrual_cycle,
         show_dose_chevrons: this.config.show_dose_chevrons !== false,
+        show_all_users: !!this.config.show_all_users,
         line_color: hexToRgb(this.config.line_color || '#E91E63'),
-        prediction_color: hexToRgb(this.config.prediction_color || this.config.line_color || '#E91E63'),
       };
     }
 
@@ -1199,8 +1249,8 @@ if (!customElements.get('estrannaise-card-editor')) {
         { name: 'show_danger_threshold', label: 'Show danger threshold (>500 pg/mL)', selector: { boolean: {} } },
         { name: 'show_menstrual_cycle', label: 'Show menstrual cycle overlay', selector: { boolean: {} } },
         { name: 'show_dose_chevrons', label: 'Show dose markers', selector: { boolean: {} } },
-        { name: 'line_color', label: 'Line color', selector: { color_rgb: {} } },
-        { name: 'prediction_color', label: 'Prediction color', selector: { color_rgb: {} } },
+        { name: 'show_all_users', label: 'Show all user traces', selector: { boolean: {} } },
+        { name: 'line_color', label: 'Primary line color (additional users auto-assigned)', selector: { color_rgb: {} } },
       ];
       form.computeLabel = (schema) => schema.label || schema.name;
 

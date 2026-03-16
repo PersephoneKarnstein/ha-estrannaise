@@ -21,6 +21,7 @@ from .const import (
     CONF_PHASE_DAYS,
     CONF_TARGET_TYPE,
     CONF_UNITS,
+    CONF_USER_ID,
     DEFAULT_AUTO_REGIMEN,
     DEFAULT_BACKFILL_DOSES,
     DEFAULT_DOSE_MG,
@@ -33,6 +34,7 @@ from .const import (
     DEFAULT_PHASE_DAYS,
     DEFAULT_TARGET_TYPE,
     DEFAULT_UNITS,
+    DEFAULT_USER_ID,
     DOMAIN,
     ESTERS,
     METHODS,
@@ -653,6 +655,9 @@ class EstrannaisConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 backfill = self._data.get(
                     CONF_BACKFILL_DOSES, DEFAULT_BACKFILL_DOSES
                 )
+                user_id = self._data.get(
+                    CONF_USER_ID, DEFAULT_USER_ID
+                )
                 first_data = {
                     CONF_ESTER: ester,
                     CONF_METHOD: method,
@@ -670,6 +675,7 @@ class EstrannaisConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_UNITS: units,
                     CONF_ENABLE_CALENDAR: enable_cal,
                     CONF_BACKFILL_DOSES: backfill,
+                    CONF_USER_ID: user_id,
                 }
                 title = (
                     f"{ester_name} {first['dose_mg']}mg"
@@ -695,6 +701,7 @@ class EstrannaisConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_UNITS: units,
                         CONF_ENABLE_CALENDAR: enable_cal,
                         CONF_BACKFILL_DOSES: backfill,
+                        CONF_USER_ID: user_id,
                         "subsidiary": True,
                     }
                     self.hass.async_create_task(
@@ -718,6 +725,9 @@ class EstrannaisConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(title=title, data=self._data)
 
         schema_fields: dict = {
+            vol.Required(
+                CONF_USER_ID, default=DEFAULT_USER_ID
+            ): vol.All(str, vol.Length(min=1, max=64)),
             vol.Required(CONF_UNITS, default=DEFAULT_UNITS): vol.In(
                 {"pg/mL": "pg/mL", "pmol/L": "pmol/L"}
             ),
@@ -820,6 +830,10 @@ class EstrannaisOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_USER_ID,
+                        default=data.get(CONF_USER_ID, DEFAULT_USER_ID),
+                    ): vol.All(str, vol.Length(min=1, max=64)),
                     vol.Required(
                         CONF_ESTER,
                         default=data.get(CONF_ESTER, DEFAULT_ESTER),

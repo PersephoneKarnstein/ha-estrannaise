@@ -31,6 +31,8 @@ from .const import (
     ATTR_SUGGESTED_REGIMEN,
     ATTR_TARGET_TYPE,
     ATTR_UNITS,
+    ATTR_USER_ID,
+    ATTR_USERS,
     DOMAIN,
     ESTERS,
     MENSTRUAL_CYCLE_DATA,
@@ -78,8 +80,10 @@ class EstrannaiseSensor(
         method_key = entry.data.get("method", "")
         ester_name = ESTERS.get(ester_key, entry.data.get("label", "HRT"))
         method_name = METHODS.get(method_key, "")
+        user_id = entry.options.get("user_id", entry.data.get("user_id", "default"))
         suffix = f" ({method_name})" if method_name else ""
-        self._attr_name = f"Estrannaise {ester_name}{suffix}"
+        user_suffix = f" [{user_id}]" if user_id != "default" else ""
+        self._attr_name = f"Estrannaise {ester_name}{suffix}{user_suffix}"
         self._attr_unique_id = f"{entry.entry_id}_e2_level"
         self._entry = entry
 
@@ -129,6 +133,8 @@ class EstrannaiseSensor(
             ATTR_CYCLE_FIT_REGIMEN: data.get("cycle_fit_regimen"),
             "baseline_e2": data.get("baseline_e2", 0.0),
             "baseline_test_ts": data.get("baseline_test_ts", 0.0),
+            ATTR_USER_ID: config.get("user_id", "default"),
+            ATTR_USERS: data.get("users", {}),
             ATTR_PK_PARAMETERS: PK_PARAMETERS,
             ATTR_MENSTRUAL_CYCLE_DATA: MENSTRUAL_CYCLE_DATA,
             ATTR_ALL_CONFIGS: data.get("all_configs", []),

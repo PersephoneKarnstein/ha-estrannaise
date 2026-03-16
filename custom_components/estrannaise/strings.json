@@ -47,6 +47,7 @@
       "settings": {
         "title": "Display & Integration Settings",
         "data": {
+          "user_id": "User ID (entries with the same ID are additive; different IDs show as separate lines)",
           "units": "Measurement units",
           "enable_calendar": "Add dose schedule to HA calendar",
           "backfill_doses": "Backfill past doses (enable if already on HRT)"
@@ -168,6 +169,7 @@
         "title": "Estrannaise Options",
         "description": "Estimated levels are pharmacokinetic approximations, not actual blood serum measurements.",
         "data": {
+          "user_id": "User ID (entries with the same ID are additive; different IDs show as separate lines)",
           "ester": "Estradiol ester",
           "method": "Dosing method",
           "dose_mg": "Dose amount ({dose_unit})",

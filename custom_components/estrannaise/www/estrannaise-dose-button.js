@@ -5,7 +5,7 @@
  * then calls estrannaise.log_dose service.
  */
 
-const DOSE_BUTTON_VERSION = '2.0.0';
+const DOSE_BUTTON_VERSION = '3.0.0';
 
 // Friendly ester names keyed by model prefix
 const ESTER_NAMES = {
@@ -283,11 +283,15 @@ if (!customElements.get('estrannaise-dose-button')) {
 
       const attrs = entity.attributes || {};
       const allConfigs = attrs.all_configs || [];
+      const myUserId = attrs.user_id || 'default';
 
-      // Build unique model entries from all configured entries
+      // Filter configs to this entity's user_id, then build unique model entries
+      const userConfigs = allConfigs.filter(cfg => (cfg.user_id || 'default') === myUserId);
+      const configsToUse = userConfigs.length > 0 ? userConfigs : allConfigs;
+
       const seen = new Set();
       const models = [];
-      for (const cfg of allConfigs) {
+      for (const cfg of configsToUse) {
         const model = resolveModelFromConfig(cfg);
         if (!model || seen.has(model)) continue;
         seen.add(model);
@@ -325,6 +329,16 @@ if (!customElements.get('estrannaise-dose-button')) {
       const models = this._getAvailableModels();
       const select = this.shadowRoot.querySelector('.dose-model');
       const input = this.shadowRoot.querySelector('.dose-amount');
+
+      // Show user_id in dialog title when multi-user
+      const dialogTitle = this.shadowRoot.querySelector('.dialog-title');
+      const users = attrs.users || {};
+      const myUserId = attrs.user_id || 'default';
+      if (dialogTitle) {
+        dialogTitle.textContent = Object.keys(users).length > 1
+          ? `Log Dose (${myUserId})`
+          : 'Log Dose';
+      }
 
       // Populate model dropdown
       select.innerHTML = '';
@@ -453,7 +467,15 @@ if (!customElements.get('estrannaise-dose-button-editor')) {
 
     setConfig(config) {
       this.config = { ...config };
-      this._render();
+      if (this._ignoreNextConfig) {
+        this._ignoreNextConfig = false;
+        return;
+      }
+      if (!this._form) {
+        this._buildForm();
+      } else {
+        this._form.data = this._getFormData();
+      }
     }
 
     set hass(hass) {
@@ -461,7 +483,17 @@ if (!customElements.get('estrannaise-dose-button-editor')) {
       if (this._form) this._form.hass = hass;
     }
 
-    _render() {
+    _getFormData() {
+      return {
+        entity: this.config.entity || '',
+        model: this.config.model || 'auto',
+        dose_mg: this.config.dose_mg || '',
+        label: this.config.label || 'Log Dose',
+        icon: this.config.icon || 'mdi:needle',
+      };
+    }
+
+    _buildForm() {
       if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
       this.shadowRoot.innerHTML = '';
 
@@ -487,17 +519,11 @@ if (!customElements.get('estrannaise-dose-button-editor')) {
             mode: 'dropdown',
           }},
         },
-        { name: 'dose_mg', label: 'Default dose (mg)', selector: { number: { min: 0.1, max: 100, step: 0.5, mode: 'box' } } },
+        { name: 'dose_mg', label: 'Default dose (mg)', selector: { number: { min: 0, max: 100, step: 'any', mode: 'box' } } },
         { name: 'label', label: 'Button label', selector: { text: {} } },
         { name: 'icon', label: 'Icon', selector: { icon: {} } },
       ];
-      form.data = {
-        entity: this.config.entity || '',
-        model: this.config.model || 'auto',
-        dose_mg: this.config.dose_mg || '',
-        label: this.config.label || 'Log Dose',
-        icon: this.config.icon || 'mdi:needle',
-      };
+      form.data = this._getFormData();
       form.computeLabel = (schema) => {
         const labels = {
           entity: 'Entity',
@@ -514,6 +540,7 @@ if (!customElements.get('estrannaise-dose-button-editor')) {
         // Remove 'auto' / empty optional fields so they fall back to entity defaults
         if (!this.config.model || this.config.model === 'auto') delete this.config.model;
         if (!this.config.dose_mg) delete this.config.dose_mg;
+        this._ignoreNextConfig = true;
         this.dispatchEvent(new CustomEvent('config-changed', {
           bubbles: true, composed: true,
           detail: { config: this.config },

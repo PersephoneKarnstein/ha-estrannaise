@@ -25,6 +25,7 @@ from .const import (
     CONF_PHASE_DAYS,
     CONF_TARGET_TYPE,
     CONF_UNITS,
+    CONF_USER_ID,
     DEFAULT_AUTO_REGIMEN,
     DEFAULT_BACKFILL_DOSES,
     DEFAULT_DOSE_MG,
@@ -38,6 +39,7 @@ from .const import (
     DEFAULT_TARGET_TYPE,
     DEFAULT_UNITS,
     DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_USER_ID,
     DOMAIN,
     MODE_AUTOMATIC,
     MODE_BOTH,
@@ -110,6 +112,10 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "backfill_doses": opts.get(
                 CONF_BACKFILL_DOSES,
                 data.get(CONF_BACKFILL_DOSES, DEFAULT_BACKFILL_DOSES),
+            ),
+            "user_id": opts.get(
+                CONF_USER_ID,
+                data.get(CONF_USER_ID, DEFAULT_USER_ID),
             ),
         }
 
@@ -399,7 +405,9 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 t += interval_sec
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from SQLite and compute current state."""
+        """Fetch data from SQLite and compute per-user state."""
+        import math
+
         entry_id = self.config_entry.entry_id
         config = self._get_config()
         now = time.time()
@@ -411,32 +419,137 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         retention = 90.0 if config.get("backfill_doses", False) else 0.0
         await self.database.prune_stale_doses(entry_id, retention)
 
-        # Get ALL doses from database (manual + persisted automatic, cross-entry)
+        # Get ALL doses and blood tests from database (cross-entry)
         all_manual_doses = await self.database.get_all_doses()
-
-        # Generate automatic recurring doses for ALL entries
-        all_configs = self._get_all_entry_configs()
-        all_auto_doses: list[dict[str, Any]] = []
-        for cfg in all_configs:
-            all_auto_doses.extend(
-                self._generate_auto_doses_for_config(cfg, now)
-            )
-
-        # Combine all doses for PK computation
-        combined_doses = all_manual_doses + all_auto_doses
-
-        # Get ALL blood tests (cross-entry)
         all_blood_tests = await self.database.get_all_blood_tests()
+        all_configs = self._get_all_entry_configs()
 
-        # Compute scaling factor and variance
-        scaling_factor, scaling_variance = await self.database.compute_scaling_factor(
-            entry_id, combined_doses, all_configs=all_configs
-        )
-
-        # Compute current E2 level
+        # Unit conversion
         units = config["units"]
         cf = AVAILABLE_UNITS.get(units, {}).get("conversion_factor", 1.0)
-        current_e2 = compute_e2_at_time(now, combined_doses, scaling_factor) * cf
+
+        # Group configs by user_id
+        user_groups: dict[str, list[dict[str, Any]]] = {}
+        for cfg in all_configs:
+            uid = cfg.get("user_id", DEFAULT_USER_ID)
+            user_groups.setdefault(uid, []).append(cfg)
+
+        # Compute per-user data
+        users_data: dict[str, dict[str, Any]] = {}
+        for uid, user_configs in user_groups.items():
+            user_entry_ids = {cfg["entry_id"] for cfg in user_configs}
+
+            # Filter manual doses belonging to this user's entries
+            user_manual_doses = [
+                d for d in all_manual_doses
+                if d["config_entry_id"] in user_entry_ids
+            ]
+
+            # Generate auto doses for this user's configs only
+            user_auto_doses: list[dict[str, Any]] = []
+            for ucfg in user_configs:
+                user_auto_doses.extend(
+                    self._generate_auto_doses_for_config(ucfg, now)
+                )
+
+            user_combined = user_manual_doses + user_auto_doses
+
+            # Filter blood tests for this user
+            user_blood_tests = [
+                bt for bt in all_blood_tests
+                if bt["config_entry_id"] in user_entry_ids
+            ]
+
+            # Compute scaling factor for this user
+            scaling_factor, scaling_variance = (
+                await self.database.compute_scaling_factor(
+                    entry_id,
+                    user_combined,
+                    all_configs=user_configs,
+                    blood_tests=user_blood_tests,
+                )
+            )
+
+            # Compute current E2 for this user
+            user_e2 = compute_e2_at_time(
+                now, user_combined, scaling_factor
+            ) * cf
+
+            # Blood test baseline (zero-state handling) per user
+            baseline_e2 = 0.0
+            baseline_test_ts = 0.0
+            baseline_candidates = [
+                bt for bt in user_blood_tests
+                if not bt.get("on_schedule")
+            ]
+            if baseline_candidates:
+                all_negligible = all(
+                    compute_e2_at_time(
+                        bt["timestamp"], user_combined
+                    ) < 1.0
+                    for bt in baseline_candidates
+                )
+                if all_negligible:
+                    latest = max(
+                        baseline_candidates,
+                        key=lambda t: t["timestamp"],
+                    )
+                    baseline_e2 = latest["level_pg_ml"]
+                    baseline_test_ts = latest["timestamp"]
+
+            if baseline_e2 > 0:
+                age_days = (now - baseline_test_ts) / 86400.0
+                baseline_decayed = baseline_e2 * math.exp(
+                    -0.02 * max(0, age_days)
+                )
+                scaling_factor = 1.0
+                scaling_variance = 0.0
+                user_e2 += baseline_decayed * cf
+
+            # Compute per-config suggested regimen (for auto_regimen configs)
+            enriched_configs = []
+            for ucfg in user_configs:
+                cfg_copy = dict(ucfg)
+                if ucfg.get("auto_regimen", False):
+                    sr = compute_suggested_regimen(
+                        ucfg["ester"],
+                        ucfg["method"],
+                        ucfg.get("target_type", "target_range"),
+                    )
+                    if sr and "schedules" in sr:
+                        cfg_copy["suggested_regimen"] = sr
+                        cfg_copy["cycle_fit_regimen"] = sr
+                    elif sr:
+                        cfg_copy["suggested_regimen"] = sr
+                        cfg_copy["cycle_fit_regimen"] = None
+                    else:
+                        cfg_copy["suggested_regimen"] = None
+                        cfg_copy["cycle_fit_regimen"] = None
+                enriched_configs.append(cfg_copy)
+
+            users_data[uid] = {
+                "user_id": uid,
+                "doses": user_manual_doses,
+                "auto_doses": user_auto_doses,
+                "blood_tests": user_blood_tests,
+                "scaling_factor": scaling_factor,
+                "scaling_variance": scaling_variance,
+                "current_e2": round(user_e2, 1),
+                "configs": enriched_configs,
+                "baseline_e2": round(baseline_e2, 2),
+                "baseline_test_ts": baseline_test_ts,
+            }
+
+        # This entry's user data (for sensor state)
+        my_user_id = config.get("user_id", DEFAULT_USER_ID)
+        my_data = users_data.get(my_user_id, {})
+        if not my_data:
+            _LOGGER.warning(
+                "User ID '%s' (entry %s) not found in computed user groups; "
+                "sensor will report empty data",
+                my_user_id,
+                entry_id,
+            )
 
         # Compute suggested regimen if auto_regimen is enabled
         suggested_regimen = None
@@ -447,55 +560,23 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 config["method"],
                 config.get("target_type", "target_range"),
             )
-            # When target is menstrual_range, suggested_regimen IS the cycle fit
             if suggested_regimen and "schedules" in suggested_regimen:
                 cycle_fit_regimen = suggested_regimen
 
-        # Blood test baseline (zero-state handling)
-        # When predicted E2 is negligible (<1 pg/mL) at all test times,
-        # multiplicative scaling cannot work. Use the most recent blood test
-        # as a persistent baseline offset. The blood test represents the
-        # individual's actual E2 from sources the PK model can't explain
-        # (endogenous production, unlogged doses, etc.) — assumed to persist.
-        # Tests marked on_schedule=True are handled by virtual steady-state
-        # in compute_scaling_factor() and should not trigger baseline mode.
-        baseline_e2 = 0.0
-        baseline_test_ts = 0.0
-        baseline_candidates = [
-            bt for bt in all_blood_tests
-            if not bt.get("on_schedule")
-        ]
-        if baseline_candidates:
-            all_negligible = all(
-                compute_e2_at_time(bt["timestamp"], combined_doses) < 1.0
-                for bt in baseline_candidates
-            )
-            if all_negligible:
-                latest = max(baseline_candidates, key=lambda t: t["timestamp"])
-                baseline_e2 = latest["level_pg_ml"]
-                baseline_test_ts = latest["timestamp"]
-
-        # Add baseline to displayed E2 value and reset bogus scaling
-        # Decay baseline exponentially so old tests fade out (λ=0.02/day, ~35d half-life)
-        if baseline_e2 > 0:
-            import math
-            age_days = (now - baseline_test_ts) / 86400.0
-            baseline_decayed = baseline_e2 * math.exp(-0.02 * max(0, age_days))
-            scaling_factor = 1.0
-            scaling_variance = 0.0
-            current_e2 += baseline_decayed * cf
-
         return {
-            "doses": all_manual_doses,
-            "auto_doses": all_auto_doses,
-            "blood_tests": all_blood_tests,
-            "scaling_factor": scaling_factor,
-            "scaling_variance": scaling_variance,
-            "current_e2": round(current_e2, 1),
+            # Per-user data for the card
+            "users": users_data,
+            # Flat fields for sensor state (this entry's user)
+            "doses": my_data.get("doses", []),
+            "auto_doses": my_data.get("auto_doses", []),
+            "blood_tests": my_data.get("blood_tests", []),
+            "scaling_factor": my_data.get("scaling_factor", 1.0),
+            "scaling_variance": my_data.get("scaling_variance", 0.0),
+            "current_e2": my_data.get("current_e2", 0.0),
             "config": config,
             "all_configs": all_configs,
             "suggested_regimen": suggested_regimen,
             "cycle_fit_regimen": cycle_fit_regimen,
-            "baseline_e2": round(baseline_e2, 2),
-            "baseline_test_ts": baseline_test_ts,
+            "baseline_e2": my_data.get("baseline_e2", 0.0),
+            "baseline_test_ts": my_data.get("baseline_test_ts", 0.0),
         }

@@ -4,7 +4,7 @@
  * A button that opens a dialog for entering blood estradiol test results.
  */
 
-const TEST_BUTTON_VERSION = '1.0.0';
+const TEST_BUTTON_VERSION = '2.0.0';
 
 if (!customElements.get('estrannaise-test-button')) {
 
@@ -236,13 +236,23 @@ if (!customElements.get('estrannaise-test-button')) {
       this.shadowRoot.getElementById('schedule-toggle-section').style.display = 'none';
       this.shadowRoot.getElementById('test-on-schedule').checked = true;
 
-      // Update unit label
+      // Update unit label and show user_id when multi-user
       if (this._hass) {
         const entity = this._hass.states[this.config.entity];
         if (entity) {
-          const units = entity.attributes?.units || 'pg/mL';
+          const attrs = entity.attributes || {};
+          const units = attrs.units || 'pg/mL';
           const unitLabel = this.shadowRoot.querySelector('.unit-label');
           if (unitLabel) unitLabel.textContent = units;
+
+          const dialogH3 = this.shadowRoot.querySelector('.dialog h3');
+          const users = attrs.users || {};
+          const myUserId = attrs.user_id || 'default';
+          if (dialogH3) {
+            dialogH3.textContent = Object.keys(users).length > 1
+              ? `Log Blood Test (${myUserId})`
+              : 'Log Blood Test';
+          }
         }
       }
 
@@ -373,7 +383,15 @@ if (!customElements.get('estrannaise-test-button-editor')) {
 
     setConfig(config) {
       this.config = { ...config };
-      this._render();
+      if (this._ignoreNextConfig) {
+        this._ignoreNextConfig = false;
+        return;
+      }
+      if (!this._form) {
+        this._buildForm();
+      } else {
+        this._form.data = this._getFormData();
+      }
     }
 
     set hass(hass) {
@@ -381,7 +399,15 @@ if (!customElements.get('estrannaise-test-button-editor')) {
       if (this._form) this._form.hass = hass;
     }
 
-    _render() {
+    _getFormData() {
+      return {
+        entity: this.config.entity || '',
+        label: this.config.label || 'Log Blood Test',
+        icon: this.config.icon || 'mdi:test-tube',
+      };
+    }
+
+    _buildForm() {
       if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
       this.shadowRoot.innerHTML = '';
 
@@ -392,11 +418,7 @@ if (!customElements.get('estrannaise-test-button-editor')) {
         { name: 'label', label: 'Button label', selector: { text: {} } },
         { name: 'icon', label: 'Icon', selector: { icon: {} } },
       ];
-      form.data = {
-        entity: this.config.entity || '',
-        label: this.config.label || 'Log Blood Test',
-        icon: this.config.icon || 'mdi:test-tube',
-      };
+      form.data = this._getFormData();
       form.computeLabel = (schema) => {
         const labels = {
           entity: 'Entity',
@@ -408,6 +430,7 @@ if (!customElements.get('estrannaise-test-button-editor')) {
       form.addEventListener('value-changed', (ev) => {
         const newData = ev.detail.value;
         this.config = { ...this.config, ...newData };
+        this._ignoreNextConfig = true;
         this.dispatchEvent(new CustomEvent('config-changed', {
           bubbles: true, composed: true,
           detail: { config: this.config },

@@ -262,6 +262,7 @@ class EstrannaisDatabase:
         all_doses: list[dict[str, Any]],
         all_configs: list[dict[str, Any]] | None = None,
         decay_lambda: float = 0.02,
+        blood_tests: list[dict[str, Any]] | None = None,
     ) -> tuple[float, float]:
         """Compute exponentially-weighted scaling factor from blood tests.
 
@@ -272,13 +273,16 @@ class EstrannaisDatabase:
         (no dose records that far back), virtual steady-state doses are
         generated from all_configs to produce a meaningful prediction.
 
+        If *blood_tests* is provided, uses those directly instead of
+        fetching all tests from the database (for per-user computation).
+
         decay_lambda: exponential decay rate for weighting (per day).
         Returns (factor, variance) where factor is clamped to [0.0, 2.0].
         Returns (1.0, 0.0) if no usable tests.
         """
         from .const import compute_e2_at_time, compute_steady_state_e2_at_time
 
-        tests = await self.get_all_blood_tests()
+        tests = blood_tests if blood_tests is not None else await self.get_all_blood_tests()
         if not tests:
             return (1.0, 0.0)
 

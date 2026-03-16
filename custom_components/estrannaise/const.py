@@ -22,6 +22,7 @@ CONF_AUTO_REGIMEN = "auto_regimen"
 CONF_TARGET_TYPE = "target_type"
 CONF_PHASE_DAYS = "phase_days"
 CONF_BACKFILL_DOSES = "backfill_doses"
+CONF_USER_ID = "user_id"
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ DEFAULT_AUTO_REGIMEN = False
 DEFAULT_TARGET_TYPE = "target_range"
 DEFAULT_PHASE_DAYS = 0.0
 DEFAULT_BACKFILL_DOSES = False
+DEFAULT_USER_ID = "default"
 DEFAULT_UPDATE_INTERVAL = 300  # 5 minutes
 
 # ── Dosing modes ─────────────────────────────────────────────────────────────
@@ -68,6 +70,8 @@ ATTR_AUTO_REGIMEN = "auto_regimen"
 ATTR_TARGET_TYPE = "target_type"
 ATTR_SUGGESTED_REGIMEN = "suggested_regimen"
 ATTR_CYCLE_FIT_REGIMEN = "cycle_fit_regimen"
+ATTR_USER_ID = "user_id"
+ATTR_USERS = "users"
 
 # ── Target range (WPATH SOC 8 / Endocrine Society) ──────────────────────────
 
