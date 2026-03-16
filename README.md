@@ -85,6 +85,34 @@ The chart displays:
 - "Now" vertical line separating past from prediction
 - Coincident doses of the same ester are merged and shown as a combined amount
 
+#### Per-user trace colors with card-mod
+
+When multiple users are configured, the selected entity's user gets the **Primary line color** and others are auto-assigned from a palette. You can override individual user colors with [card-mod](https://github.com/thomasloven/lovelace-card-mod) using CSS custom properties:
+
+```yaml
+type: custom:estrannaise-card
+entity: sensor.estrannaise_estradiol_enanthate_persephone
+show_all_users: true
+card_mod:
+  style: |
+    :host {
+      --estrannaise-color-persephone: #E91E63;
+      --estrannaise-color-benzoate: #00BCD4;
+    }
+```
+
+The property name follows the pattern `--estrannaise-color-<user_id>`. These override all color usage for that user: the chart trace, confidence bands, dose markers, blood test dots, and the header E2 indicator.
+
+For more granular styling, each trace group in the Plotly SVG has a CSS class `estrannaise-user-<user_id>` and a `data-estrannaise-user` attribute. Shared elements (target range, danger threshold, etc.) have `estrannaise-shared`. These can be targeted via card-mod, though Plotly uses inline styles so `!important` is required:
+
+```yaml
+card_mod:
+  style: |
+    .estrannaise-user-benzoate path {
+      stroke-width: 4px !important;
+    }
+```
+
 ### Log Dose button
 
 ```yaml

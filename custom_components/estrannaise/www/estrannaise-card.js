@@ -386,21 +386,23 @@ if (!customElements.get('estrannaise-card')) {
       card.querySelector('.header span').textContent = titleText;
       this._plotEl = card.querySelector('.plot-container');
 
-      // Watch for card-mod style injection and re-render when it happens
-      // (card-mod adds/modifies <style> elements in the shadow root)
-      this._styleObserver = new MutationObserver((mutations) => {
-        const styleChanged = mutations.some(m =>
-          [...m.addedNodes].some(n => n.nodeName === 'STYLE') ||
-          (m.type === 'characterData' && m.target.parentNode?.nodeName === 'STYLE')
-        );
-        if (styleChanged) {
-          this._lastEntityKey = null; // invalidate dedup cache
-          if (this._hass) this._update();
-        }
-      });
-      this._styleObserver.observe(this.shadowRoot, {
-        childList: true, subtree: true, characterData: true,
-      });
+      // Re-render when card-mod injects styles.  card-mod appends a
+      // <card-mod> element (light-DOM, no shadow root) to our shadow root,
+      // then LitElement renders a <style> inside it on a microtask.  We
+      // listen for the "card-mod-update" event it dispatches, and also
+      // schedule a one-shot deferred re-render to catch the initial paint.
+      this._cardModHandler = () => {
+        this._lastEntityKey = null;
+        if (this._hass) this._update();
+      };
+      this.shadowRoot.addEventListener('card-mod-update', this._cardModHandler);
+
+      // Deferred re-render: gives card-mod time to attach and render
+      this._deferredRenderTimer = setTimeout(() => {
+        this._deferredRenderTimer = null;
+        this._lastEntityKey = null;
+        if (this._hass) this._update();
+      }, 500);
     }
 
     async _ensurePlotly() {
@@ -1159,9 +1161,13 @@ if (!customElements.get('estrannaise-card')) {
         this._resizeObserver.disconnect();
         this._resizeObserver = null;
       }
-      if (this._styleObserver) {
-        this._styleObserver.disconnect();
-        this._styleObserver = null;
+      if (this._cardModHandler && this.shadowRoot) {
+        this.shadowRoot.removeEventListener('card-mod-update', this._cardModHandler);
+        this._cardModHandler = null;
+      }
+      if (this._deferredRenderTimer) {
+        clearTimeout(this._deferredRenderTimer);
+        this._deferredRenderTimer = null;
       }
       if (this._plotEl && window.Plotly) {
         window.Plotly.purge(this._plotEl);
