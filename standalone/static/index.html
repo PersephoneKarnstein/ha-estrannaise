@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estrannaise</title>
+<script src="/static/plotly.min.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #16171a; --panel: #1e2024; --fg: #e6e6e6; --muted: #9aa0a6;
+    --accent: #9775fa; --line: rgba(255,255,255,.09);
+    --btn: rgba(255,255,255,.08); --btn-hover: rgba(255,255,255,.16);
+    --ok: #51cf66; --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+  .page { max-width: 60rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 1rem; color: var(--muted); }
+  h2 { font-size: .8rem; font-weight: 600; text-transform: uppercase;
+       letter-spacing: .06em; color: var(--muted); margin: 0 0 .6rem; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: .75rem; padding: 1rem; margin-bottom: 1rem; }
+  .level { display: flex; align-items: baseline; gap: .5rem; }
+  .level .n { font-size: 3rem; font-weight: 600; line-height: 1; }
+  .muted { color: var(--muted); font-size: .8rem; }
+  #chart { width: 100%; height: 20rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  input, select, button {
+    font: inherit; color: var(--fg); background: var(--btn);
+    border: 1px solid transparent; border-radius: .5rem; padding: .5rem .7rem;
+  }
+  input, select { min-width: 6rem; }
+  button { cursor: pointer; transition: background .15s ease; }
+  button:hover:not(:disabled) { background: var(--btn-hover); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; }
+  button.danger { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th { text-align: left; font-weight: 500; color: var(--muted);
+       font-size: .75rem; padding: .3rem .4rem; }
+  td { padding: .35rem .4rem; border-top: 1px solid var(--line); }
+  td.right, th.right { text-align: right; }
+  .x { background: none; border: none; color: var(--muted); cursor: pointer;
+       padding: 0 .3rem; }
+  .x:hover { color: var(--err); }
+  #status { position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%);
+            background: var(--panel); border: 1px solid var(--line);
+            border-radius: .5rem; padding: .5rem .9rem; font-size: .85rem;
+            opacity: 0; transition: opacity .2s ease; pointer-events: none; }
+  #status.show { opacity: 1; }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--err); }
+  .grid { display: grid; gap: .5rem;
+          grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); }
+  label { font-size: .75rem; color: var(--muted); display: block; margin-bottom: .2rem; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Estrannaise</h1>
+
+  <div class="card">
+    <div class="level">
+      <span class="n" id="level">--</span>
+      <span class="muted" id="units"></span>
+    </div>
+    <div class="muted" id="calib"></div>
+  </div>
+
+  <div class="card">
+    <h2>Levels</h2>
+    <div id="chart"></div>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <div class="row">
+      <select id="entry"></select>
+      <input id="doseMg" type="number" step="0.1" min="0" placeholder="mg">
+      <button class="primary" id="logDose">Log dose</button>
+      <span style="flex:1"></span>
+      <input id="level_in" type="number" step="1" min="0" placeholder="level">
+      <label style="margin:0"><input type="checkbox" id="onSched" checked
+             style="min-width:0"> on schedule</label>
+      <button id="logTest">Log blood test</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Regimen</h2>
+    <div class="grid">
+      <div><label>Ester</label><select id="r_ester"></select></div>
+      <div><label>Method</label><select id="r_method"></select></div>
+      <div><label>Dose (mg)</label><input id="r_dose" type="number" step="0.1" min="0"></div>
+      <div><label>Interval (days)</label><input id="r_interval" type="number" step="0.5" min="0"></div>
+      <div><label>Mode</label><select id="r_mode">
+        <option value="manual">manual</option>
+        <option value="automatic">automatic</option>
+        <option value="both">both</option></select></div>
+      <div><label>Dose time</label><input id="r_time" type="time"></div>
+      <div><label>Units</label><select id="r_units"></select></div>
+      <div><label>Backfill</label><select id="r_backfill">
+        <option value="false">no</option><option value="true">yes</option></select></div>
+    </div>
+    <div class="row" style="margin-top:.75rem">
+      <button class="primary" id="saveCfg">Save regimen</button>
+      <span class="muted" id="cfgHint"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Doses</h2>
+    <table><thead><tr><th>When</th><th>Model</th><th class="right">Dose</th>
+      <th>Source</th><th></th></tr></thead><tbody id="doses"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>Blood tests</h2>
+    <table><thead><tr><th>When</th><th class="right">Level</th>
+      <th>On schedule</th><th>Notes</th><th></th></tr></thead>
+      <tbody id="tests"></tbody></table>
+  </div>
+</div>
+<div id="status"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let STATE = null, CONFIG = null;
+
+function say(msg, ok = true) {
+  const el = $('status');
+  el.textContent = msg;
+  el.className = 'show ' + (ok ? 'ok' : 'bad');
+  setTimeout(() => el.className = '', 3000);
+}
+
+// Injected by the server, which only serves this page to an authorised request.
+const TOKEN = window.ESTRANNAISE_TOKEN || '';
+
+async function api(path, opts = {}) {
+  const headers = {...(opts.headers || {})};
+  if (TOKEN) headers['X-Estrannaise-Token'] = TOKEN;
+  const r = await fetch(path, {cache: 'no-store', ...opts, headers});
+  const body = r.status === 204 ? null : await r.json().catch(() => null);
+  if (r.status === 401) throw new Error('Not authorised — token missing or wrong');
+  if (!r.ok) throw new Error((body && body.detail) || ('HTTP ' + r.status));
+  return body;
+}
+
+const fmt = ts => new Date(ts * 1000).toLocaleString(undefined,
+  {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+
+function fillSelect(el, values, selected) {
+  el.innerHTML = values.map(v =>
+    `<option value="${v}"${v === selected ? ' selected' : ''}>${v}</option>`).join('');
+}
+
+async function loadAll() {
+  try {
+    [STATE, CONFIG] = await Promise.all([api('/api/state'), api('/api/config')]);
+  } catch (e) { say(e.message, false); return; }
+
+  $('level').textContent = STATE.current_e2;
+  $('units').textContent = STATE.units;
+  const sf = STATE.scaling_factor;
+  $('calib').textContent = (sf && sf !== 1)
+    ? `calibrated ×${sf.toFixed(3)} from ${STATE.blood_tests.length} test(s)`
+    : 'uncalibrated — log a blood test to fit the model';
+
+  const reg = CONFIG.regimens[0];
+  fillSelect($('entry'), CONFIG.regimens.map(r => r.entry_id));
+  $('entry').style.display = CONFIG.regimens.length > 1 ? '' : 'none';
+
+  fillSelect($('r_ester'), Object.keys(STATE.esters), reg && reg.ester);
+  fillSelect($('r_method'), Object.keys(STATE.methods), reg && reg.method);
+  fillSelect($('r_units'), Object.keys(STATE.available_units), STATE.units);
+  if (reg) {
+    $('r_dose').value = reg.dose_mg;
+    $('doseMg').value = reg.dose_mg;
+    $('r_interval').value = reg.interval_days;
+    $('r_mode').value = reg.mode;
+    $('r_time').value = reg.dose_time;
+    $('r_backfill').value = String(!!reg.backfill_doses);
+  }
+  $('cfgHint').textContent = CONFIG.regimens.length
+    ? '' : 'No regimen yet — set one and save.';
+
+  renderTable('doses', STATE.doses, d => `
+    <td>${fmt(d.timestamp)}</td><td>${d.model}</td>
+    <td class="right">${d.dose_mg} mg</td><td class="muted">${d.source}</td>
+    <td class="right"><button class="x" data-del="doses" data-id="${d.id}">&times;</button></td>`);
+
+  renderTable('tests', STATE.blood_tests, t => `
+    <td>${fmt(t.timestamp)}</td><td class="right">${t.level_pg_ml}</td>
+    <td class="muted">${t.on_schedule ? 'yes' : 'no'}</td>
+    <td class="muted">${t.notes || ''}</td>
+    <td class="right"><button class="x" data-del="blood-tests" data-id="${t.id}">&times;</button></td>`);
+
+  drawChart();
+}
+
+function renderTable(id, rows, row) {
+  const body = $(id);
+  const sorted = [...rows].sort((a, b) => b.timestamp - a.timestamp);
+  body.innerHTML = sorted.length
+    ? sorted.map(r => `<tr>${row(r)}</tr>`).join('')
+    : '<tr><td colspan="5" class="muted">Nothing logged yet.</td></tr>';
+}
+
+document.addEventListener('click', async ev => {
+  const btn = ev.target.closest('[data-del]');
+  if (!btn) return;
+  const entry = $('entry').value;
+  try {
+    await api(`/api/${btn.dataset.del}/${btn.dataset.id}?entry_id=${entry}`,
+              {method: 'DELETE'});
+    say('Deleted'); loadAll();
+  } catch (e) { say(e.message, false); }
+});
+
+async function drawChart() {
+  let d;
+  try { d = await api('/api/curve?days_back=30&days_forward=30&points=280'); }
+  catch (e) { return; }
+
+  const traces = d.series.map(s => ({
+    x: s.samples.map(p => new Date(p.t * 1000)),
+    y: s.samples.map(p => p.e2),
+    type: 'scatter', mode: 'lines', name: s.user_id,
+    line: {width: 2, shape: 'spline'},
+    hovertemplate: '%{y:.0f} ' + d.units + '<extra></extra>'
+  }));
+
+  traces.push({
+    x: STATE.blood_tests.map(t => new Date(t.timestamp * 1000)),
+    y: STATE.blood_tests.map(t => t.level_pg_ml),
+    type: 'scatter', mode: 'markers', name: 'blood tests',
+    marker: {size: 8, symbol: 'diamond', color: '#f9b15d'}
+  });
+
+  Plotly.react('chart', traces, {
+    margin: {l: 45, r: 10, t: 10, b: 35},
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {color: '#e6e6e6', size: 11},
+    xaxis: {gridcolor: 'rgba(255,255,255,.08)', zeroline: false},
+    yaxis: {gridcolor: 'rgba(255,255,255,.08)', zeroline: false,
+            title: {text: d.units, font: {size: 10}}},
+    shapes: [{
+      type: 'rect', xref: 'paper', yref: 'y', x0: 0, x1: 1,
+      y0: d.target_range.lower, y1: d.target_range.upper,
+      fillcolor: 'rgba(151,117,250,.13)', line: {width: 0}, layer: 'below'
+    }, {
+      type: 'line', xref: 'x', yref: 'paper',
+      x0: new Date(d.now * 1000), x1: new Date(d.now * 1000), y0: 0, y1: 1,
+      line: {color: '#e6e6e6', width: 1, dash: 'dot'}
+    }],
+    legend: {orientation: 'h', y: 1.1, font: {size: 10}}
+  }, {displayModeBar: false, responsive: true});
+}
+
+$('logDose').onclick = async () => {
+  const mg = parseFloat($('doseMg').value);
+  if (!isFinite(mg) || mg <= 0) return say('Enter a dose in mg', false);
+  try {
+    await api('/api/doses', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({entry_id: $('entry').value, dose_mg: mg})});
+    say('Dose logged'); loadAll();
+  } catch (e) { say(e.message, false); }
+};
+
+$('logTest').onclick = async () => {
+  const lvl = parseFloat($('level_in').value);
+  if (!isFinite(lvl) || lvl < 0) return say('Enter a measured level', false);
+  try {
+    await api('/api/blood-tests', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({entry_id: $('entry').value, level_pg_ml: lvl,
+                            on_schedule: $('onSched').checked})});
+    $('level_in').value = '';
+    say('Blood test logged'); loadAll();
+  } catch (e) { say(e.message, false); }
+};
+
+$('saveCfg').onclick = async () => {
+  const existing = (CONFIG.regimens[0] || {});
+  const regimen = {
+    ...existing,
+    ester: $('r_ester').value,
+    method: $('r_method').value,
+    dose_mg: parseFloat($('r_dose').value) || 0,
+    interval_days: parseFloat($('r_interval').value) || 0,
+    mode: $('r_mode').value,
+    dose_time: $('r_time').value || '08:00',
+    backfill_doses: $('r_backfill').value === 'true'
+  };
+  const regimens = CONFIG.regimens.length
+    ? [regimen, ...CONFIG.regimens.slice(1)] : [regimen];
+  try {
+    await api('/api/config', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({units: $('r_units').value, regimens})});
+    say('Regimen saved'); loadAll();
+  } catch (e) { say(e.message, false); }
+};
+
+loadAll();
+setInterval(loadAll, 300000);
+</script>
+</body>
+</html>

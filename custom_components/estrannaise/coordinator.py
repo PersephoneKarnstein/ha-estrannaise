@@ -50,6 +50,7 @@ from .const import (
     terminal_elimination_days,
 )
 from .database import EstrannaisDatabase
+from .schedule import generate_auto_doses, pending_auto_doses
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -134,275 +135,44 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _generate_auto_doses_for_config(
         config: dict[str, Any], now: float, lookback_days: float = 90.0
     ) -> list[dict[str, Any]]:
-        """Generate synthetic dose records for a config's recurring schedule."""
-        from datetime import datetime, timezone
+        """Generate synthetic dose records for a config's recurring schedule.
+
+        Delegates to the Home Assistant-free ``schedule`` module so this
+        integration and the standalone app project doses from identical code.
+        """
         from homeassistant.util import dt as dt_util
 
-        mode = config["mode"]
-        if mode not in (MODE_AUTOMATIC, MODE_BOTH):
-            return []
-
-        ester = config["ester"]
-        method = config["method"]
-        dose_mg = config["dose_mg"]
-        interval_days = config["interval_days"]
-        if interval_days <= 0:
-            return []
-
-        # Align to time-of-day (in HA's configured local timezone)
-        dose_time = config.get("dose_time", "08:00")
-        try:
-            parts = dose_time.split(":")
-            hour = int(parts[0])
-            minute = int(parts[1]) if len(parts) > 1 else 0
-        except (ValueError, IndexError):
-            hour, minute = 8, 0
-        hour = max(0, min(23, hour))
-        minute = max(0, min(59, minute))
-
-        local_tz = dt_util.DEFAULT_TIME_ZONE
-
-        def _local_dose_anchor(ref_ts: float) -> float:
-            """Get the UTC timestamp of today's dose time in the user's timezone."""
-            ref_dt = datetime.fromtimestamp(ref_ts, tz=local_tz)
-            local_dose = ref_dt.replace(
-                hour=hour, minute=minute, second=0, microsecond=0
-            )
-            return local_dose.timestamp()
-
-        # If auto_regimen is enabled, use suggested regimen values
-        cycle_fit = None
-        if config.get("auto_regimen", False):
-            target_type = config.get("target_type", "target_range")
-            suggested = compute_suggested_regimen(ester, method, target_type)
-            if suggested:
-                if "schedules" in suggested:
-                    cycle_fit = suggested
-                else:
-                    dose_mg = suggested["dose_mg"]
-                    interval_days = suggested["interval_days"]
-
-        doses: list[dict[str, Any]] = []
-        future_limit = now + lookback_days * 86400.0
-
-        if cycle_fit:
-            # Multi-schedule cycle fit: generate future doses per schedule
-            today_anchor = _local_dose_anchor(now)
-            # Use local-time day for cycle phase calculation
-            now_local = datetime.fromtimestamp(now, tz=local_tz)
-            epoch_day_local = int(now_local.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).timestamp() // 86400)
-            cycle_day_now = epoch_day_local % 28
-
-            for sch in cycle_fit["schedules"]:
-                sch_dose = sch["dose_mg"]
-                sch_interval = sch["interval_days"]
-                if sch_interval <= 0:
-                    continue
-                sch_phase = int(sch["phase_days"])
-                sch_model = sch["model_key"]
-                sch_interval_sec = sch_interval * 86400.0
-
-                # Anchor to most recent cycle day matching the phase
-                days_back = (cycle_day_now - sch_phase) % 28
-                anchor_ts = today_anchor - days_back * 86400.0
-
-                # Step forward to next future dose
-                t = anchor_ts
-                while t <= now:
-                    t += sch_interval_sec
-
-                while t <= future_limit:
-                    doses.append(
-                        {
-                            "id": None,
-                            "timestamp": t,
-                            "model": sch_model,
-                            "dose_mg": sch_dose,
-                            "source": "automatic",
-                        }
-                    )
-                    t += sch_interval_sec
-        else:
-            # Single schedule
-            interval_sec = interval_days * 86400.0
-            model_key = resolve_model_key(ester, method, interval_days)
-            if not model_key:
-                return []
-
-            phase_days = config.get("phase_days", 0.0)
-
-            if phase_days and phase_days > 0:
-                # Phase-based anchoring (from cycle fit discrete entry)
-                today_anchor = _local_dose_anchor(now)
-                now_local = datetime.fromtimestamp(now, tz=local_tz)
-                epoch_day_local = int(now_local.replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                ).timestamp() // 86400)
-                cycle_day_now = epoch_day_local % 28
-                days_back = (cycle_day_now - int(phase_days)) % 28
-                anchor_ts = today_anchor - days_back * 86400.0
-
-                t = anchor_ts
-                while t <= now:
-                    t += interval_sec
-                while t <= future_limit:
-                    doses.append(
-                        {
-                            "id": None,
-                            "timestamp": t,
-                            "model": model_key,
-                            "dose_mg": dose_mg,
-                            "source": "automatic",
-                        }
-                    )
-                    t += interval_sec
-            else:
-                # Standard anchoring (today's dose time)
-                today_dose_ts = _local_dose_anchor(now)
-                if today_dose_ts > now:
-                    anchor = today_dose_ts - interval_sec
-                else:
-                    anchor = today_dose_ts
-
-                t = anchor + interval_sec
-                while t <= future_limit:
-                    doses.append(
-                        {
-                            "id": None,
-                            "timestamp": t,
-                            "model": model_key,
-                            "dose_mg": dose_mg,
-                            "source": "automatic",
-                        }
-                    )
-                    t += interval_sec
-
-        return doses[:1000]
+        return generate_auto_doses(
+            config, now, dt_util.DEFAULT_TIME_ZONE, lookback_days
+        )
 
     async def _persist_auto_doses(
         self, config: dict[str, Any], now: float
     ) -> None:
         """Write past automatic doses to the database.
 
-        Computes which scheduled doses should have occurred between the
-        pharmacokinetic lookback window and *now*, checks which are already
-        persisted, and inserts the missing ones.
+        Schedule arithmetic lives in the ``schedule`` module; this method only
+        handles persistence.
         """
-        from datetime import datetime
         from homeassistant.util import dt as dt_util
 
-        mode = config.get("mode", "manual")
-        if mode not in (MODE_AUTOMATIC, MODE_BOTH):
-            return
-
         entry_id = self.config_entry.entry_id
-        ester = config["ester"]
-        method = config["method"]
-
-        # Parse dose time-of-day (in HA's configured local timezone)
-        dose_time_str = config.get("dose_time", "08:00")
-        try:
-            parts = dose_time_str.split(":")
-            hour = int(parts[0])
-            minute = int(parts[1]) if len(parts) > 1 else 0
-        except (ValueError, IndexError):
-            hour, minute = 8, 0
-        hour = max(0, min(23, hour))
-        minute = max(0, min(59, minute))
-
-        local_tz = dt_util.DEFAULT_TIME_ZONE
-
-        # Resolve schedule(s)
-        schedules: list[dict[str, Any]] = []
-        if config.get("auto_regimen", False):
-            target_type = config.get("target_type", "target_range")
-            suggested = compute_suggested_regimen(ester, method, target_type)
-            if suggested and "schedules" in suggested:
-                schedules = suggested["schedules"]
-            elif suggested:
-                schedules = [{
-                    "dose_mg": suggested["dose_mg"],
-                    "interval_days": suggested["interval_days"],
-                    "phase_days": 0.0,
-                    "model_key": suggested.get("model_key", ""),
-                }]
-
-        if not schedules:
-            dose_mg = config["dose_mg"]
-            interval_days = config["interval_days"]
-            model_key = resolve_model_key(ester, method, interval_days)
-            if not model_key:
-                return
-            schedules = [{
-                "dose_mg": dose_mg,
-                "interval_days": interval_days,
-                "phase_days": config.get("phase_days", 0.0),
-                "model_key": model_key,
-            }]
-
-        # Fetch existing automatic dose timestamps to avoid duplicates
         existing_ts = await self.database.get_auto_dose_timestamps(entry_id)
 
-        for sch in schedules:
-            sch_dose = sch["dose_mg"]
-            sch_interval = sch["interval_days"]
-            sch_phase = float(sch.get("phase_days", 0.0))
-            sch_model = sch.get("model_key", "")
-            if not sch_model:
-                sch_model = resolve_model_key(ester, method, sch_interval)
-            if not sch_model:
-                continue
-
-            interval_sec = sch_interval * 86400.0
-            if interval_sec <= 0:
-                continue
-
-            if config.get("backfill_doses", False):
-                # Backfill: fill the full chart history (90 days, matching
-                # the future projection window)
-                lookback_ts = now - 90.0 * 86400.0
-            else:
-                # No backfill: only catch doses since the last refresh
-                lookback_ts = now - DEFAULT_UPDATE_INTERVAL - 60
-
-            # Compute anchor timestamp (in user's local timezone)
-            now_local = datetime.fromtimestamp(now, tz=local_tz)
-            today_dose = now_local.replace(
-                hour=hour, minute=minute, second=0, microsecond=0
+        for dose in pending_auto_doses(
+            config,
+            now,
+            dt_util.DEFAULT_TIME_ZONE,
+            existing_timestamps=existing_ts,
+            update_interval=DEFAULT_UPDATE_INTERVAL,
+        ):
+            await self.database.add_dose(
+                config_entry_id=entry_id,
+                model=dose["model"],
+                dose_mg=dose["dose_mg"],
+                timestamp=dose["timestamp"],
+                source="automatic",
             )
-            today_dose_ts = today_dose.timestamp()
-
-            if sch_phase > 0:
-                epoch_day_local = int(now_local.replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                ).timestamp() // 86400)
-                cycle_day_now = epoch_day_local % 28
-                days_back = (cycle_day_now - int(sch_phase)) % 28
-                anchor_ts = today_dose_ts - days_back * 86400.0
-            else:
-                anchor_ts = today_dose_ts
-
-            # Walk back to find earliest dose within lookback window
-            t = anchor_ts
-            while t > lookback_ts:
-                t -= interval_sec
-            t += interval_sec  # First dose within window
-
-            # Persist past doses that don't already exist
-            while t < now:
-                # Check within 60s tolerance to avoid duplicates
-                if not any(abs(t - ets) < 60 for ets in existing_ts):
-                    await self.database.add_dose(
-                        config_entry_id=entry_id,
-                        model=sch_model,
-                        dose_mg=sch_dose,
-                        timestamp=t,
-                        source="automatic",
-                    )
-                    existing_ts.add(t)
-                t += interval_sec
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from SQLite and compute per-user state."""
