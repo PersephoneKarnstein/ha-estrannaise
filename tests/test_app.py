@@ -97,6 +97,38 @@ class TestConfig:
         assert leftovers == []
 
 
+class TestRegimenValidation:
+    def test_rejects_unsupported_combination(self, client):
+        r = client.post("/api/config", json={
+            "units": "pg/mL",
+            "regimens": [{**REGIMEN, "ester": "EEn", "method": "patch"}],
+        })
+        assert r.status_code == 400
+        # The error must say what IS allowed, not just that this is not.
+        assert "Intramuscular" in r.json()["detail"]
+
+    def test_rejects_oral_injectable(self, client):
+        r = client.post("/api/config", json={
+            "units": "pg/mL",
+            "regimens": [{**REGIMEN, "ester": "E", "method": "im"}],
+        })
+        assert r.status_code == 400
+
+    def test_accepts_patch_for_plain_estradiol(self, client):
+        r = client.post("/api/config", json={
+            "units": "pg/mL",
+            "regimens": [{**REGIMEN, "ester": "E", "method": "patch",
+                          "interval_days": 3.5}],
+        })
+        assert r.status_code == 200
+
+    def test_state_advertises_supported_methods(self, client):
+        configure(client)
+        supported = client.get("/api/state").json()["supported_methods"]
+        assert supported["EEn"] == ["im", "subq"]
+        assert supported["E"] == ["patch", "oral"]
+
+
 class TestDoses:
     def test_log_and_list(self, client):
         entry_id = configure(client)
@@ -212,6 +244,34 @@ class TestState:
     def test_automatic_mode_projects_future_doses(self, client):
         configure(client, mode="automatic")
         assert client.get("/api/state").json()["auto_doses"]
+
+
+class TestHistoryRetention:
+    """History must survive. build_state used to prune on every request."""
+
+    def test_old_doses_are_not_deleted(self, client):
+        entry_id = configure(client)
+        # Well past any PK model's terminal elimination window.
+        ancient = time.time() - 400 * 86400
+        client.post("/api/doses", json={"entry_id": entry_id, "dose_mg": 4.0,
+                                        "timestamp": ancient})
+        # Several state builds, as a dashboard polling would produce.
+        for _ in range(3):
+            client.get("/api/state")
+        doses = client.get("/api/state").json()["doses"]
+        assert len(doses) == 1, "an imported historical dose was deleted"
+        assert doses[0]["timestamp"] == pytest.approx(ancient, abs=1)
+
+    def test_old_blood_tests_are_not_deleted(self, client):
+        entry_id = configure(client)
+        ancient = time.time() - 400 * 86400
+        client.post("/api/blood-tests", json={"entry_id": entry_id,
+                                              "level_pg_ml": 120.0,
+                                              "timestamp": ancient,
+                                              "on_schedule": True})
+        for _ in range(3):
+            client.get("/api/state")
+        assert len(client.get("/api/state").json()["blood_tests"]) == 1
 
 
 class TestCurve:

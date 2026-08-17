@@ -154,9 +154,19 @@ async function api(path, opts = {}) {
 const fmt = ts => new Date(ts * 1000).toLocaleString(undefined,
   {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 
-function fillSelect(el, values, selected) {
+function fillSelect(el, values, selected, labels) {
   el.innerHTML = values.map(v =>
-    `<option value="${v}"${v === selected ? ' selected' : ''}>${v}</option>`).join('');
+    `<option value="${v}"${v === selected ? ' selected' : ''}>${labels ? labels[v] : v}</option>`
+  ).join('');
+}
+
+// Only 12 of the 24 ester/method pairs have PK parameters. Offering the other
+// 12 lets you save a regimen that cannot resolve to a model, which then fails
+// at dose-logging time with "Unknown model: None".
+function fillMethods(ester, selected) {
+  const valid = (STATE.supported_methods || {})[ester] || Object.keys(STATE.methods);
+  const keep = valid.includes(selected) ? selected : valid[0];
+  fillSelect($('r_method'), valid, keep, STATE.methods);
 }
 
 async function loadAll() {
@@ -175,8 +185,12 @@ async function loadAll() {
   fillSelect($('entry'), CONFIG.regimens.map(r => r.entry_id));
   $('entry').style.display = CONFIG.regimens.length > 1 ? '' : 'none';
 
-  fillSelect($('r_ester'), Object.keys(STATE.esters), reg && reg.ester);
-  fillSelect($('r_method'), Object.keys(STATE.methods), reg && reg.method);
+  const esterKeys = Object.keys(STATE.esters);
+  const currentEster = (reg && reg.ester) || esterKeys[0];
+  fillSelect($('r_ester'), esterKeys, currentEster, STATE.esters);
+  fillMethods(currentEster, reg && reg.method);
+  // Re-narrow the methods whenever the ester changes.
+  $('r_ester').onchange = () => fillMethods($('r_ester').value, $('r_method').value);
   fillSelect($('r_units'), Object.keys(STATE.available_units), STATE.units);
   if (reg) {
     $('r_dose').value = reg.dose_mg;

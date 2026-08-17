@@ -260,6 +260,23 @@ async def api_get_config():
 
 @app.post("/api/config")
 async def api_set_config(body: ConfigIn, db=Depends(get_db)):
+    # Reject unresolvable regimens here rather than letting them save and fail
+    # later at dose-logging time with "Unknown model: None".
+    for regimen in body.regimens:
+        ester = regimen.get("ester")
+        method = regimen.get("method")
+        if not const.is_combination_supported(ester, method):
+            allowed = [
+                m for m in const.METHODS if const.is_combination_supported(ester, m)
+            ]
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{const.ESTERS.get(ester, ester)} cannot be given by "
+                    f"{const.METHODS.get(method, method)}. "
+                    f"Valid methods: {', '.join(const.METHODS[m] for m in allowed) or 'none'}"
+                ),
+            )
     save_config(CONFIG_PATH, body.model_dump())
     # Apply backfill immediately so the chart reflects the change at once.
     config = _current_config()

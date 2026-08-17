@@ -72,10 +72,23 @@ async def build_state(
 
     await persist_pending_doses(db, regimens, now, local_tz)
 
-    for regimen in regimens:
-        retention = 90.0 if regimen.get("backfill_doses", False) else 0.0
-        await db.prune_stale_doses(regimen["entry_id"], retention)
-
+    # Deliberately NOT calling db.prune_stale_doses here, unlike the Home
+    # Assistant coordinator.
+    #
+    # That function issues DELETE FROM doses for anything older than the PK
+    # model's terminal elimination window, and it does not distinguish manual
+    # doses from generated ones. In Home Assistant that is housekeeping: a dose
+    # from a year ago contributes ~0 to the current level, so dropping it costs
+    # nothing the coordinator cares about.
+    #
+    # Here it is destructive. This app is a personal record, and importing
+    # years of history from Home Assistant is an explicitly supported workflow,
+    # so silently deleting anything past the elimination window defeats the
+    # purpose. build_state runs on every request, including dashboard polls, so
+    # the deletion happened within seconds of startup and looked like the
+    # import having failed.
+    #
+    # The cost of keeping everything is a few rows per week in SQLite.
     all_doses = await db.get_all_doses()
     all_blood_tests = await db.get_all_blood_tests()
 
@@ -169,5 +182,16 @@ async def build_state(
         "pk_parameters": const.PK_PARAMETERS,
         "esters": const.ESTERS,
         "methods": const.METHODS,
+        # Only 12 of the 24 ester/method pairs have PK parameters. The UI uses
+        # this to offer just the valid ones rather than letting you build a
+        # regimen that cannot resolve to a model.
+        "supported_methods": {
+            ester: [
+                method
+                for method in const.METHODS
+                if const.is_combination_supported(ester, method)
+            ]
+            for ester in const.ESTERS
+        },
         "available_units": const.AVAILABLE_UNITS,
     }
