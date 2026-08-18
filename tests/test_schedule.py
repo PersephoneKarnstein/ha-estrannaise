@@ -185,3 +185,109 @@ class TestTimezoneHandling:
         doses = schedule.generate_auto_doses(cfg(dose_time="21:30"), NOW, TZ)
         first = datetime.fromtimestamp(doses[0]["timestamp"], tz=TZ)
         assert (first.hour, first.minute) == (21, 30)
+
+
+class TestHistoryAnchoring:
+    """The schedule must follow recorded history, not the current date.
+
+    Regression tests for a defect that corrupted a real database. A config
+    with ``phase_days`` unset re-derived its cadence from "today" on every
+    call. Restored history dosing on Sundays, restarted on a Monday, produced
+    a lattice one day off the history -- so the chart drew a doubled dose, and
+    ``pending_auto_doses`` wrote a fresh spurious dose every single day.
+    """
+
+    # Sundays at 22:00 local, matching a real weekly IM regimen.
+    SUNDAYS = [
+        datetime(2026, 8, d, 22, 0, tzinfo=TZ).timestamp() for d in (2, 9, 16)
+    ]
+    # The following Monday afternoon: history exists, today is not a dose day.
+    MONDAY = datetime(2026, 8, 17, 15, 0, tzinfo=TZ).timestamp()
+
+    def weekly_at_22(self, **overrides):
+        return cfg(dose_time="22:00", **overrides)
+
+    def test_projection_continues_the_recorded_weekday(self):
+        doses = schedule.generate_auto_doses(
+            self.weekly_at_22(), self.MONDAY, TZ, last_dose_ts=self.SUNDAYS[-1]
+        )
+        first = datetime.fromtimestamp(doses[0]["timestamp"], TZ)
+        assert first.strftime("%a") == "Sun"
+        assert (first.month, first.day) == (8, 23)
+
+    def test_projection_never_lands_the_day_after_a_recorded_dose(self):
+        doses = schedule.generate_auto_doses(
+            self.weekly_at_22(), self.MONDAY, TZ, last_dose_ts=self.SUNDAYS[-1]
+        )
+        assert all(
+            datetime.fromtimestamp(d["timestamp"], TZ).strftime("%a") == "Sun"
+            for d in doses
+        )
+
+    def test_pending_writes_nothing_on_a_non_dose_day(self):
+        """The bug wrote a dose every night at the dose time."""
+        for day in (17, 18, 19, 20, 21, 22):
+            now = datetime(2026, 8, day, 22, 3, tzinfo=TZ).timestamp()
+            pending = schedule.pending_auto_doses(
+                self.weekly_at_22(), now, TZ, existing_timestamps=set(self.SUNDAYS)
+            )
+            assert pending == [], f"spurious dose written on Aug {day}"
+
+    def test_pending_writes_on_the_next_scheduled_day(self):
+        now = datetime(2026, 8, 23, 22, 3, tzinfo=TZ).timestamp()
+        pending = schedule.pending_auto_doses(
+            self.weekly_at_22(), now, TZ, existing_timestamps=set(self.SUNDAYS)
+        )
+        assert len(pending) == 1
+        written = datetime.fromtimestamp(pending[0]["timestamp"], TZ)
+        assert (written.month, written.day, written.hour) == (8, 23, 22)
+
+    def test_no_history_still_starts_from_today(self):
+        """A brand-new config has nothing to follow, so today is correct."""
+        doses = schedule.generate_auto_doses(
+            self.weekly_at_22(), self.MONDAY, TZ, last_dose_ts=None
+        )
+        first = datetime.fromtimestamp(doses[0]["timestamp"], TZ)
+        assert (first.month, first.day) == (8, 17)
+
+    def test_phase_still_wins_over_history(self):
+        """Cycle fits pin to a phase; history must not override that."""
+        phased = self.weekly_at_22(phase_days=17.0)
+        doses = schedule.generate_auto_doses(
+            phased, self.MONDAY, TZ, last_dose_ts=self.MONDAY
+        )
+        assert datetime.fromtimestamp(doses[0]["timestamp"], TZ).strftime("%a") == "Sun"
+
+    def test_cadence_survives_a_dst_transition(self):
+        """Stepping by fixed seconds would slide 22:00 to 21:00 in November."""
+        november = datetime(2026, 11, 20, 12, 0, tzinfo=TZ).timestamp()
+        last = datetime(2026, 10, 25, 22, 0, tzinfo=TZ).timestamp()
+        doses = schedule.generate_auto_doses(
+            self.weekly_at_22(), november, TZ, last_dose_ts=last
+        )
+        for d in doses[:6]:
+            local = datetime.fromtimestamp(d["timestamp"], TZ)
+            assert (local.hour, local.minute) == (22, 0)
+            assert local.strftime("%a") == "Sun"
+
+    def test_long_gap_does_not_hang(self):
+        """An anchor years back must resolve by arithmetic, not by iteration."""
+        ancient = datetime(2019, 1, 6, 22, 0, tzinfo=TZ).timestamp()
+        doses = schedule.generate_auto_doses(
+            self.weekly_at_22(), self.MONDAY, TZ, last_dose_ts=ancient
+        )
+        assert doses
+        first = datetime.fromtimestamp(doses[0]["timestamp"], TZ)
+        assert first.strftime("%a") == "Sun"
+        assert first.timestamp() > self.MONDAY
+
+    def test_pending_derives_history_from_existing_timestamps(self):
+        """Callers pass existing timestamps; pending must anchor on their max."""
+        now = datetime(2026, 8, 18, 22, 3, tzinfo=TZ).timestamp()
+        assert schedule.pending_auto_doses(
+            self.weekly_at_22(), now, TZ, existing_timestamps=set(self.SUNDAYS)
+        ) == []
+        # With no history it falls back to today and does write.
+        assert schedule.pending_auto_doses(
+            self.weekly_at_22(), now, TZ, existing_timestamps=set()
+        )

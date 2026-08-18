@@ -16,7 +16,7 @@ that callers supply. That makes it directly unit-testable.
 
 from __future__ import annotations
 
-from datetime import datetime, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 from .const import (
@@ -76,6 +76,101 @@ def _phase_anchor(
     return today_anchor - days_back * 86400.0
 
 
+def _make_stepper(
+    interval_days: float, hour: int, minute: int, local_tz: tzinfo
+):
+    """Return ``step(ts, n=1)``, advancing *n* intervals from *ts*.
+
+    Whole-day intervals step by local calendar days and are re-pinned to the
+    dose time, so a schedule stays at 22:00 local across a DST transition
+    rather than sliding to 21:00 and desynchronising from the stored history.
+    Fractional intervals fall back to fixed seconds, where a wall-clock time of
+    day is not meaningful anyway.
+    """
+    if float(interval_days).is_integer():
+        whole = int(interval_days)
+
+        def step(ts: float, n: int = 1) -> float:
+            local = datetime.fromtimestamp(ts, tz=local_tz) + timedelta(days=whole * n)
+            return local.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            ).timestamp()
+
+    else:
+        seconds = float(interval_days) * 86400.0
+
+        def step(ts: float, n: int = 1) -> float:
+            return ts + seconds * n
+
+    return step
+
+
+def _resolve_anchor(
+    sch: dict[str, Any],
+    now: float,
+    hour: int,
+    minute: int,
+    local_tz: tzinfo,
+    last_dose_ts: float | None,
+) -> float:
+    """The reference point a schedule's dose lattice is built from.
+
+    Precedence matters, and this is the fix for a real defect. Anchoring to
+    "today" means the cadence is re-derived from the current date on every
+    run, so a config whose phase is unset silently migrates onto whatever
+    weekday the app happened to be restarted on -- and, because the lattice
+    then lands one day off the stored history, backfills a fresh dose every
+    single day. Anchoring to the last recorded dose makes the schedule follow
+    the history instead of the calendar.
+    """
+    phase = float(sch.get("phase_days", 0.0) or 0.0)
+    if phase > 0:
+        # Cycle fits pin themselves to a day within the 28-day cycle. That is
+        # already history-independent and stable, so leave it alone.
+        return _phase_anchor(now, phase, hour, minute, local_tz)
+    if last_dose_ts is not None:
+        return local_dose_anchor(last_dose_ts, hour, minute, local_tz)
+    # No history yet: a brand-new config starts from today.
+    return local_dose_anchor(now, hour, minute, local_tz)
+
+
+def _first_after(
+    anchor: float, bound: float, step, interval_days: float
+) -> float:
+    """Smallest point on the schedule lattice strictly after *bound*.
+
+    Works whether the anchor sits before or after the bound, so one helper
+    serves both the future projection (bound = now) and the backfill window
+    (bound = the start of the lookback).
+    """
+    interval_sec = float(interval_days) * 86400.0
+    t = anchor
+
+    # Coarse jump first, so an anchor years in the past does not cost one
+    # iteration per interval.
+    if t <= bound and interval_sec > 0:
+        jumps = int((bound - t) // interval_sec)
+        if jumps:
+            t = step(t, jumps)
+
+    guard = 0
+    while t <= bound and guard < MAX_GENERATED_DOSES:
+        t = step(t)
+        guard += 1
+
+    # Anchor may have started past the bound; walk back to the first one that
+    # still clears it.
+    guard = 0
+    while guard < MAX_GENERATED_DOSES:
+        previous = step(t, -1)
+        if previous <= bound:
+            break
+        t = previous
+        guard += 1
+
+    return t
+
+
 def resolve_schedules(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve a config into one or more concrete dose schedules.
 
@@ -125,42 +220,43 @@ def generate_auto_doses(
     now: float,
     local_tz: tzinfo,
     lookback_days: float = PROJECTION_DAYS,
+    last_dose_ts: float | None = None,
 ) -> list[dict[str, Any]]:
     """Project *future* synthetic doses for a config's recurring schedule.
 
     These are never persisted -- they exist so the chart can draw the projected
     curve ahead of now. Past doses are handled by :func:`pending_auto_doses`.
+
+    *last_dose_ts* is the timestamp of the most recent automatic dose already
+    recorded for this config. Supplying it continues the cadence the history
+    actually established; omitting it starts the cadence from today, which is
+    only correct for a config with no history at all.
     """
     if not is_scheduled(config):
         return []
 
     hour, minute = parse_dose_time(config.get("dose_time"))
     future_limit = now + lookback_days * 86400.0
+    schedules = resolve_schedules(config)
+    # One recorded dose cannot be attributed to a particular schedule of a
+    # multi-schedule cycle fit. Those set phase_days, so they anchor on phase.
+    history = last_dose_ts if len(schedules) == 1 else None
     doses: list[dict[str, Any]] = []
 
-    for sch in resolve_schedules(config):
-        interval_sec = sch["interval_days"] * 86400.0
-        if interval_sec <= 0:
+    for sch in schedules:
+        interval_days = sch["interval_days"]
+        if interval_days <= 0:
             continue
 
         model_key = sch.get("model_key") or resolve_model_key(
-            config["ester"], config["method"], sch["interval_days"]
+            config["ester"], config["method"], interval_days
         )
         if not model_key:
             continue
 
-        phase = float(sch.get("phase_days", 0.0) or 0.0)
-        if phase > 0:
-            anchor = _phase_anchor(now, phase, hour, minute, local_tz)
-        else:
-            today = local_dose_anchor(now, hour, minute, local_tz)
-            # If today's dose time has not arrived yet, step back one interval
-            # so the first projected dose is today's, not next interval's.
-            anchor = today - interval_sec if today > now else today
-
-        t = anchor
-        while t <= now:
-            t += interval_sec
+        step = _make_stepper(interval_days, hour, minute, local_tz)
+        anchor = _resolve_anchor(sch, now, hour, minute, local_tz, history)
+        t = _first_after(anchor, now, step, interval_days)
 
         while t <= future_limit and len(doses) < MAX_GENERATED_DOSES:
             doses.append(
@@ -172,7 +268,7 @@ def generate_auto_doses(
                     "source": "automatic",
                 }
             )
-            t += interval_sec
+            t = step(t)
 
     return doses[:MAX_GENERATED_DOSES]
 
@@ -192,6 +288,11 @@ def pending_auto_doses(
 
     With ``backfill_doses`` the window is the full projection history; without
     it, only far enough back to catch doses missed since the last refresh.
+
+    The cadence continues from the most recent timestamp in
+    *existing_timestamps* rather than from today. Without that, a config with
+    no ``phase_days`` re-anchors to the current date on every call and writes a
+    fresh dose every day, one day off the history it already has.
     """
     if not is_scheduled(config):
         return []
@@ -204,30 +305,24 @@ def pending_auto_doses(
     else:
         lookback_ts = now - update_interval - 60
 
+    schedules = resolve_schedules(config)
+    history = max(existing) if existing and len(schedules) == 1 else None
     pending: list[dict[str, Any]] = []
 
-    for sch in resolve_schedules(config):
-        interval_sec = sch["interval_days"] * 86400.0
-        if interval_sec <= 0:
+    for sch in schedules:
+        interval_days = sch["interval_days"]
+        if interval_days <= 0:
             continue
 
         model_key = sch.get("model_key") or resolve_model_key(
-            config["ester"], config["method"], sch["interval_days"]
+            config["ester"], config["method"], interval_days
         )
         if not model_key:
             continue
 
-        phase = float(sch.get("phase_days", 0.0) or 0.0)
-        if phase > 0:
-            anchor = _phase_anchor(now, phase, hour, minute, local_tz)
-        else:
-            anchor = local_dose_anchor(now, hour, minute, local_tz)
-
-        # Walk back past the window, then step forward to the first dose inside it.
-        t = anchor
-        while t > lookback_ts:
-            t -= interval_sec
-        t += interval_sec
+        step = _make_stepper(interval_days, hour, minute, local_tz)
+        anchor = _resolve_anchor(sch, now, hour, minute, local_tz, history)
+        t = _first_after(anchor, lookback_ts, step, interval_days)
 
         while t < now and len(pending) < MAX_GENERATED_DOSES:
             if not any(abs(t - ets) < DUPLICATE_TOLERANCE_SEC for ets in existing):
@@ -240,6 +335,6 @@ def pending_auto_doses(
                     }
                 )
                 existing.add(t)
-            t += interval_sec
+            t = step(t)
 
     return pending

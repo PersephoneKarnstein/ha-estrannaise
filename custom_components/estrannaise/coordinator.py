@@ -133,7 +133,10 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @staticmethod
     def _generate_auto_doses_for_config(
-        config: dict[str, Any], now: float, lookback_days: float = 90.0
+        config: dict[str, Any],
+        now: float,
+        lookback_days: float = 90.0,
+        last_dose_ts: float | None = None,
     ) -> list[dict[str, Any]]:
         """Generate synthetic dose records for a config's recurring schedule.
 
@@ -143,7 +146,11 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         from homeassistant.util import dt as dt_util
 
         return generate_auto_doses(
-            config, now, dt_util.DEFAULT_TIME_ZONE, lookback_days
+            config,
+            now,
+            dt_util.DEFAULT_TIME_ZONE,
+            lookback_days,
+            last_dose_ts=last_dose_ts,
         )
 
     async def _persist_auto_doses(
@@ -194,6 +201,16 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         all_blood_tests = await self.database.get_all_blood_tests()
         all_configs = self._get_all_entry_configs()
 
+        # Latest recorded automatic dose per entry, so the projection continues
+        # the established cadence rather than re-anchoring to the current date.
+        latest_auto: dict[str, float] = {}
+        for dose in all_manual_doses:
+            if dose.get("source") != "automatic":
+                continue
+            eid = dose["config_entry_id"]
+            if dose["timestamp"] > latest_auto.get(eid, 0.0):
+                latest_auto[eid] = dose["timestamp"]
+
         # Unit conversion
         units = config["units"]
         cf = AVAILABLE_UNITS.get(units, {}).get("conversion_factor", 1.0)
@@ -219,7 +236,9 @@ class EstrannaisCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             user_auto_doses: list[dict[str, Any]] = []
             for ucfg in user_configs:
                 user_auto_doses.extend(
-                    self._generate_auto_doses_for_config(ucfg, now)
+                    self._generate_auto_doses_for_config(
+                        ucfg, now, last_dose_ts=latest_auto.get(ucfg["entry_id"])
+                    )
                 )
 
             user_combined = user_manual_doses + user_auto_doses

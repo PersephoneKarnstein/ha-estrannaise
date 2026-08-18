@@ -92,6 +92,18 @@ async def build_state(
     all_doses = await db.get_all_doses()
     all_blood_tests = await db.get_all_blood_tests()
 
+    # Latest recorded automatic dose per config, so the projection continues
+    # the cadence the history established instead of re-anchoring to today.
+    # Manual doses are excluded deliberately: under mode "both" they are extra
+    # injections layered on top of the schedule, not the schedule itself.
+    latest_auto: dict[str, float] = {}
+    for dose in all_doses:
+        if dose.get("source") != "automatic":
+            continue
+        entry_id = dose["config_entry_id"]
+        if dose["timestamp"] > latest_auto.get(entry_id, 0.0):
+            latest_auto[entry_id] = dose["timestamp"]
+
     groups: dict[str, list[dict[str, Any]]] = {}
     for regimen in regimens:
         groups.setdefault(regimen.get("user_id", const.DEFAULT_USER_ID), []).append(
@@ -105,7 +117,14 @@ async def build_state(
         manual = [d for d in all_doses if d["config_entry_id"] in entry_ids]
         projected: list[dict[str, Any]] = []
         for regimen in user_regimens:
-            projected.extend(schedule.generate_auto_doses(regimen, now, local_tz))
+            projected.extend(
+                schedule.generate_auto_doses(
+                    regimen,
+                    now,
+                    local_tz,
+                    last_dose_ts=latest_auto.get(regimen["entry_id"]),
+                )
+            )
         combined = manual + projected
 
         blood_tests = [
