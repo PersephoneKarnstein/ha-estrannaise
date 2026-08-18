@@ -485,6 +485,12 @@ class TestEmbedPlotBands:
         assert "d.target_range.lower" in body
         assert "d.danger_threshold" in body
 
+    def test_range_is_computed_not_pinned_to_zero(self, client):
+        """A zero floor pushed a 117-142 curve into the top fifth of the tile."""
+        body = client.get("/embed/plot").text
+        assert "range: [yLo, yHi]" in body
+        assert "range: [0," not in body
+
     def test_palette_matches_the_lovelace_card(self, client):
         body = client.get("/embed/plot").text
         assert "rgba(33,150,243,.13)" in body

@@ -236,6 +236,26 @@ document.addEventListener('click', async ev => {
   } catch (e) { say(e.message, false); }
 });
 
+// Vertical range for the chart.
+//
+// Two competing needs. The curve should fill the plot rather than hug one
+// edge, but the ideal band is the reference the curve is read against, so a
+// window tight around the data alone would show a curve floating in shading
+// with no visible band edges to judge it by. The range therefore covers the
+// data *and* the whole ideal band, which answers "am I in range" at a glance.
+//
+// The danger band is open-ended upwards and usually far above the curve, so
+// reaching for it is conditional: including 500 unconditionally would squash
+// a curve peaking near 200 into a sliver at the bottom.
+function chartRange(d, values) {
+  const lo = Math.min(d.target_range.lower, ...values);
+  const hi = values.length && Math.max(...values) > d.danger_threshold * 0.6
+    ? Math.max(d.danger_threshold * 1.02, ...values)
+    : Math.max(d.target_range.upper, ...values);
+  const pad = Math.max((hi - lo) * 0.08, 1);
+  return [Math.max(0, lo - pad), hi + pad];
+}
+
 async function drawChart() {
   let d;
   try { d = await api('/api/curve?days_back=30&days_forward=30&points=280'); }
@@ -264,15 +284,9 @@ async function drawChart() {
   // The danger band is open-ended upwards, so it needs a concrete ceiling.
   // Autorange would either clip it or let the shape itself stretch the axis,
   // so the range is computed here and pinned instead.
-  // The axis only stretches toward the danger band once levels come within
-  // reach of it. Always reserving room up to 500 would squash a curve peaking
-  // near 200 into the bottom third of the plot for no information gained.
   const values = d.series.flatMap(s => s.samples.map(p => p.e2))
     .concat(STATE.blood_tests.map(t => t.level_pg_ml * cf));
-  const dataMax = values.length ? Math.max(...values) : d.danger_threshold;
-  const yTop = dataMax > d.danger_threshold * 0.6
-    ? Math.max(dataMax * 1.08, d.danger_threshold * 1.05)
-    : dataMax * 1.12;
+  const [yLo, yHi] = chartRange(d, values);
 
   Plotly.react('chart', traces, {
     margin: {l: 45, r: 10, t: 10, b: 35},
@@ -280,7 +294,7 @@ async function drawChart() {
     font: {color: '#e6e6e6', size: 11},
     xaxis: {gridcolor: 'rgba(255,255,255,.08)', zeroline: false},
     yaxis: {gridcolor: 'rgba(255,255,255,.08)', zeroline: false,
-            range: [0, yTop],
+            range: [yLo, yHi],
             title: {text: d.units, font: {size: 10}}},
     shapes: [{
       // Ideal band.
@@ -291,7 +305,7 @@ async function drawChart() {
       // Danger band: open-ended upwards, so it is drawn to the top of the
       // plot rather than to a fixed ceiling the curve might exceed.
       type: 'rect', xref: 'paper', yref: 'y', x0: 0, x1: 1,
-      y0: d.danger_threshold, y1: yTop,
+      y0: d.danger_threshold, y1: Math.max(yHi, d.danger_threshold * 1.05),
       fillcolor: 'rgba(244,67,54,.10)', line: {width: 0}, layer: 'below'
     }, {
       type: 'line', xref: 'x', yref: 'paper',
@@ -310,7 +324,7 @@ async function drawChart() {
       text: `danger >${Math.round(d.danger_threshold)}`, showarrow: false,
       font: {size: 9, color: 'rgba(244,67,54,.85)'},
       // Hidden when the band sits above the visible range.
-      visible: d.danger_threshold < yTop
+      visible: d.danger_threshold < yHi
     }],
     legend: {orientation: 'h', y: 1.1, font: {size: 10}}
   }, {displayModeBar: false, responsive: true});
