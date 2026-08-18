@@ -143,6 +143,18 @@ const isLight = document.body.classList.contains('light');
 const fg = isLight ? '#1a1b1e' : '#e6e6e6';
 const grid = isLight ? 'rgba(0,0,0,.08)' : 'rgba(255,255,255,.08)';
 
+// The danger band is open-ended upwards and usually sits far above the curve.
+// Always extending the axis to reach it would squash a curve peaking near
+// 200 into the bottom third of a small tile, so the axis only stretches
+// toward the band once levels come within reach of it.
+function chartTop(d) {
+  const values = d.series.flatMap(s => s.samples.map(p => p.e2));
+  const dataMax = values.length ? Math.max(...values) : d.danger_threshold;
+  return dataMax > d.danger_threshold * 0.6
+    ? Math.max(dataMax * 1.08, d.danger_threshold * 1.05)
+    : dataMax * 1.12;
+}
+
 async function draw() {
   try {
     const d = await api('/api/curve?days_back=21&days_forward=14&points=200');
@@ -155,22 +167,47 @@ async function draw() {
       hovertemplate: '%{y:.0f} ' + d.units + '<extra></extra>'
     }));
 
+    const yTop = chartTop(d);
+
     const shapes = [{
       type: 'rect', xref: 'paper', yref: 'y', x0: 0, x1: 1,
       y0: d.target_range.lower, y1: d.target_range.upper,
-      fillcolor: 'rgba(151,117,250,.13)', line: {width: 0}, layer: 'below'
+      fillcolor: 'rgba(33,150,243,.13)', line: {width: 0}, layer: 'below'
+    }, {
+      type: 'rect', xref: 'paper', yref: 'y', x0: 0, x1: 1,
+      y0: d.danger_threshold, y1: Math.max(yTop, d.danger_threshold * 1.05),
+      fillcolor: 'rgba(244,67,54,.10)', line: {width: 0}, layer: 'below'
     }, {
       type: 'line', xref: 'x', yref: 'paper',
       x0: new Date(d.now * 1000), x1: new Date(d.now * 1000), y0: 0, y1: 1,
       line: {color: fg, width: 1, dash: 'dot'}
     }];
 
+    const annotations = [{
+      xref: 'paper', yref: 'y', x: 0.99, xanchor: 'right',
+      y: (d.target_range.lower + d.target_range.upper) / 2, yanchor: 'middle',
+      text: 'ideal', showarrow: false,
+      font: {size: 8, color: 'rgba(33,150,243,.85)'}
+    }];
+    // Only label the danger band when it is actually on the chart.
+    if (d.danger_threshold < yTop) {
+      annotations.push({
+        xref: 'paper', yref: 'y', x: 0.99, xanchor: 'right',
+        y: d.danger_threshold, yanchor: 'bottom',
+        text: 'danger', showarrow: false,
+        font: {size: 8, color: 'rgba(244,67,54,.85)'}
+      });
+    }
+
     Plotly.react('chart', traces, {
       margin: {l: 38, r: 8, t: 8, b: 28},
       paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
       font: {color: fg, size: 10},
       xaxis: {gridcolor: grid, zeroline: false},
-      yaxis: {gridcolor: grid, zeroline: false, title: {text: d.units, font: {size: 9}}},
+      yaxis: {gridcolor: grid, zeroline: false, range: [0, yTop],
+              title: {text: d.units, font: {size: 9}}},
+      shapes: shapes,
+      annotations: annotations,
       showlegend: d.series.length > 1,
       legend: {orientation: 'h', y: 1.12, font: {size: 9}}
     }, {displayModeBar: false, responsive: true});

@@ -264,10 +264,15 @@ async function drawChart() {
   // The danger band is open-ended upwards, so it needs a concrete ceiling.
   // Autorange would either clip it or let the shape itself stretch the axis,
   // so the range is computed here and pinned instead.
+  // The axis only stretches toward the danger band once levels come within
+  // reach of it. Always reserving room up to 500 would squash a curve peaking
+  // near 200 into the bottom third of the plot for no information gained.
   const values = d.series.flatMap(s => s.samples.map(p => p.e2))
     .concat(STATE.blood_tests.map(t => t.level_pg_ml * cf));
   const dataMax = values.length ? Math.max(...values) : d.danger_threshold;
-  const yTop = Math.max(dataMax * 1.08, d.danger_threshold * 1.05);
+  const yTop = dataMax > d.danger_threshold * 0.6
+    ? Math.max(dataMax * 1.08, d.danger_threshold * 1.05)
+    : dataMax * 1.12;
 
   Plotly.react('chart', traces, {
     margin: {l: 45, r: 10, t: 10, b: 35},
@@ -303,7 +308,9 @@ async function drawChart() {
       xref: 'paper', yref: 'y', x: 0.995, xanchor: 'right',
       y: d.danger_threshold, yanchor: 'bottom',
       text: `danger >${Math.round(d.danger_threshold)}`, showarrow: false,
-      font: {size: 9, color: 'rgba(244,67,54,.85)'}
+      font: {size: 9, color: 'rgba(244,67,54,.85)'},
+      // Hidden when the band sits above the visible range.
+      visible: d.danger_threshold < yTop
     }],
     legend: {orientation: 'h', y: 1.1, font: {size: 10}}
   }, {displayModeBar: false, responsive: true});

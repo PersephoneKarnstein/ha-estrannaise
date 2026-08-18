@@ -466,3 +466,26 @@ class TestBandParityWithLovelaceCard:
         # www/estrannaise-card.js: target 100-200, "Danger (>500 pg/mL)".
         assert (d["target_range"]["lower"], d["target_range"]["upper"]) == (100, 200)
         assert d["danger_threshold"] == 500
+
+
+class TestEmbedPlotBands:
+    """The dashboard tile must draw the same bands as the full page.
+
+    Regression: /embed/plot built a `shapes` array and then never passed it to
+    Plotly.react, so the target band was computed and silently discarded. The
+    tile rendered a bare curve while the code looked correct on inspection.
+    """
+
+    def test_shapes_reach_the_layout(self, client):
+        body = client.get("/embed/plot").text
+        assert "shapes: shapes" in body, "shapes computed but not passed to Plotly"
+
+    def test_draws_both_bands(self, client):
+        body = client.get("/embed/plot").text
+        assert "d.target_range.lower" in body
+        assert "d.danger_threshold" in body
+
+    def test_palette_matches_the_lovelace_card(self, client):
+        body = client.get("/embed/plot").text
+        assert "rgba(33,150,243,.13)" in body
+        assert "rgba(244,67,54,.10)" in body
