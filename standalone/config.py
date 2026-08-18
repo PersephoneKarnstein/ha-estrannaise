@@ -50,7 +50,27 @@ def normalise_regimen(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def default_config() -> dict[str, Any]:
-    return {"units": const.DEFAULT_UNITS, "regimens": []}
+    return {
+        "units": const.DEFAULT_UNITS,
+        "regimens": [],
+        "danger_threshold": const.DANGER_THRESHOLD,
+    }
+
+
+def normalise_danger_threshold(raw: Any) -> float:
+    """Validate the chart's upper band, falling back to the default.
+
+    Anything non-numeric, non-positive, or below the target range would draw a
+    band overlapping or inverting the ideal band, so it is rejected rather than
+    rendered as a misleading chart.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(const.DANGER_THRESHOLD)
+    if value <= const.TARGET_RANGE_UPPER:
+        return float(const.DANGER_THRESHOLD)
+    return value
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -80,6 +100,9 @@ def load_config(path: Path) -> dict[str, Any]:
     return {
         "units": units,
         "regimens": [normalise_regimen(r) for r in raw.get("regimens", [])],
+        "danger_threshold": normalise_danger_threshold(
+            raw.get("danger_threshold", const.DANGER_THRESHOLD)
+        ),
     }
 
 
@@ -93,6 +116,11 @@ def save_config(path: Path, config: dict[str, Any]) -> None:
     payload = {
         "units": config.get("units", const.DEFAULT_UNITS),
         "regimens": [normalise_regimen(r) for r in config.get("regimens", [])],
+        # Carried explicitly: this function whitelists keys, so anything not
+        # named here is silently dropped on the next save.
+        "danger_threshold": normalise_danger_threshold(
+            config.get("danger_threshold", const.DANGER_THRESHOLD)
+        ),
     }
 
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".config-", suffix=".tmp")

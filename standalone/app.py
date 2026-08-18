@@ -173,6 +173,10 @@ class BloodTestIn(BaseModel):
 class ConfigIn(BaseModel):
     units: str = const.DEFAULT_UNITS
     regimens: list[dict[str, Any]] = Field(default_factory=list)
+    # Upper edge of the chart's danger band, in pg/mL. Validated in
+    # config.normalise_danger_threshold rather than here, so a value loaded
+    # from a hand-edited config.json gets the same treatment as one posted.
+    danger_threshold: float = const.DANGER_THRESHOLD
 
 
 def _current_config() -> dict[str, Any]:
@@ -245,10 +249,17 @@ async def api_curve(
         ]
         series.append({"user_id": user_id, "samples": samples})
 
+    # Everything below is in the configured units, thresholds included. They
+    # are stored in pg/mL, so plotting them unconverted alongside a pmol/L
+    # curve would draw the bands in the wrong place by a factor of ~3.67.
     return {
         "now": now,
         "units": state["units"],
-        "target_range": state["target_range"],
+        "target_range": {
+            "lower": state["target_range"]["lower"] * conversion,
+            "upper": state["target_range"]["upper"] * conversion,
+        },
+        "danger_threshold": state["danger_threshold"] * conversion,
         "series": series,
     }
 

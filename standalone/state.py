@@ -175,10 +175,13 @@ async def build_state(
         "baseline_e2": primary.get("baseline_e2", 0.0),
         "baseline_test_ts": primary.get("baseline_test_ts", 0.0),
         "all_configs": [_enrich(r) for r in regimens],
+        # Reference values, in pg/mL regardless of display units. Callers that
+        # plot alongside converted levels must convert these too.
         "target_range": {
             "lower": const.TARGET_RANGE_LOWER,
             "upper": const.TARGET_RANGE_UPPER,
         },
+        "danger_threshold": config.get("danger_threshold", const.DANGER_THRESHOLD),
         "pk_parameters": const.PK_PARAMETERS,
         "esters": const.ESTERS,
         "methods": const.METHODS,

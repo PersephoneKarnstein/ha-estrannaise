@@ -120,8 +120,33 @@ uv venv && uv pip install -r standalone/requirements.txt httpx pytest
 `tests/test_schedule.py` covers the extracted scheduling logic against a fixed clock.
 `tests/test_app.py` exercises the API against a real temporary SQLite database.
 
+## Chart bands
+
+The chart shades two ranges, matching the Lovelace card in `www/estrannaise-card.js`.
+
+The ideal band is 100–200 pg/mL, the WPATH Standards of Care v8 target range.
+Note that this is a target to aim at, not merely a window to stay inside: the guidance recommends the upper end, and post-injection peaks routinely exceed 200 without that being a problem.
+
+The danger band opens at 500 pg/mL.
+That is a display convention rather than a clinical line, chosen far enough above the target range that ordinary peaks do not trip it.
+Override it with `danger_threshold` in `config.json`:
+
+```json
+{
+  "units": "pg/mL",
+  "danger_threshold": 500,
+  "regimens": [ ... ]
+}
+```
+
+Values at or below the top of the target range are rejected, since a danger band overlapping the ideal band would draw a chart that contradicts itself.
+Both bands are stored in pg/mL and converted for display, so they stay aligned with the curve in pmol/L.
+
 ## Medical caveat
 
 This models a population average.
 Individual absorption varies enormously.
 Treat the projection as a prompt to get bloodwork, never as a substitute for it.
+
+The band edges are conventions drawn from published guidance, not advice about your body.
+Where your own targets sit is a conversation with your prescriber.

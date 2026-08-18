@@ -400,3 +400,69 @@ class TestEmbeds:
 
     def test_unknown_theme_falls_back_to_dark(self, client):
         assert 'class="dark"' in client.get("/embed/level?theme=nonsense").text
+
+
+class TestChartBands:
+    """The chart's ideal and danger bands, and the units they are drawn in."""
+
+    def test_curve_reports_both_bands(self, client):
+        configure(client)
+        d = client.get("/api/curve").json()
+        assert d["target_range"]["lower"] < d["target_range"]["upper"]
+        assert d["danger_threshold"] > d["target_range"]["upper"]
+
+    def test_bands_convert_with_the_display_units(self, client):
+        """Bands are stored in pg/mL; drawn against a pmol/L curve they must
+        convert, or they sit ~3.67x off the levels they are meant to bracket."""
+        configure(client)
+        pg = client.get("/api/curve").json()
+
+        client.post("/api/config", json={"units": "pmol/L", "regimens": [REGIMEN]})
+        pmol = client.get("/api/curve").json()
+
+        ratio = pmol["danger_threshold"] / pg["danger_threshold"]
+        assert ratio == pytest.approx(3.671, rel=0.01)
+        assert pmol["target_range"]["upper"] / pg["target_range"]["upper"] == (
+            pytest.approx(ratio)
+        )
+
+    def test_threshold_is_configurable(self, client):
+        client.post(
+            "/api/config",
+            json={"units": "pg/mL", "regimens": [REGIMEN], "danger_threshold": 350},
+        )
+        assert client.get("/api/curve").json()["danger_threshold"] == 350
+
+    def test_threshold_below_the_ideal_band_is_rejected(self, client):
+        """A band overlapping or inverting the ideal band would misinform."""
+        client.post(
+            "/api/config",
+            json={"units": "pg/mL", "regimens": [REGIMEN], "danger_threshold": 50},
+        )
+        d = client.get("/api/curve").json()
+        assert d["danger_threshold"] > d["target_range"]["upper"]
+
+    def test_threshold_survives_a_config_rewrite(self, client):
+        """save_config whitelists keys, so an unlisted one is silently lost."""
+        client.post(
+            "/api/config",
+            json={"units": "pg/mL", "regimens": [REGIMEN], "danger_threshold": 500},
+        )
+        client.post("/api/config", json={"units": "pg/mL", "regimens": [REGIMEN],
+                                         "danger_threshold": 500})
+        assert client.get("/api/curve").json()["danger_threshold"] == 500
+
+
+class TestBandParityWithLovelaceCard:
+    """The standalone chart and the HA card must not drift apart.
+
+    Both draw the same two bands; a reader comparing the dashboard tile to the
+    Home Assistant card should not see different thresholds for the same data.
+    """
+
+    def test_defaults_match_the_card(self, client):
+        configure(client)
+        d = client.get("/api/curve").json()
+        # www/estrannaise-card.js: target 100-200, "Danger (>500 pg/mL)".
+        assert (d["target_range"]["lower"], d["target_range"]["upper"]) == (100, 200)
+        assert d["danger_threshold"] == 500

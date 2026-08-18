@@ -16,3 +16,7 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+
+.venv/
+__pycache__/
+.pytest_cache/

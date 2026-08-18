@@ -249,12 +249,25 @@ async function drawChart() {
     hovertemplate: '%{y:.0f} ' + d.units + '<extra></extra>'
   }));
 
+  // Levels are stored in pg/mL but the curve is drawn in the configured
+  // units, so the markers need the same conversion or they sit on the wrong
+  // part of the chart whenever units are pmol/L.
+  const cf = (STATE.available_units[STATE.units] || {}).conversion_factor || 1;
+
   traces.push({
     x: STATE.blood_tests.map(t => new Date(t.timestamp * 1000)),
-    y: STATE.blood_tests.map(t => t.level_pg_ml),
+    y: STATE.blood_tests.map(t => t.level_pg_ml * cf),
     type: 'scatter', mode: 'markers', name: 'blood tests',
     marker: {size: 8, symbol: 'diamond', color: '#f9b15d'}
   });
+
+  // The danger band is open-ended upwards, so it needs a concrete ceiling.
+  // Autorange would either clip it or let the shape itself stretch the axis,
+  // so the range is computed here and pinned instead.
+  const values = d.series.flatMap(s => s.samples.map(p => p.e2))
+    .concat(STATE.blood_tests.map(t => t.level_pg_ml * cf));
+  const dataMax = values.length ? Math.max(...values) : d.danger_threshold;
+  const yTop = Math.max(dataMax * 1.08, d.danger_threshold * 1.05);
 
   Plotly.react('chart', traces, {
     margin: {l: 45, r: 10, t: 10, b: 35},
@@ -262,15 +275,35 @@ async function drawChart() {
     font: {color: '#e6e6e6', size: 11},
     xaxis: {gridcolor: 'rgba(255,255,255,.08)', zeroline: false},
     yaxis: {gridcolor: 'rgba(255,255,255,.08)', zeroline: false,
+            range: [0, yTop],
             title: {text: d.units, font: {size: 10}}},
     shapes: [{
+      // Ideal band.
       type: 'rect', xref: 'paper', yref: 'y', x0: 0, x1: 1,
       y0: d.target_range.lower, y1: d.target_range.upper,
-      fillcolor: 'rgba(151,117,250,.13)', line: {width: 0}, layer: 'below'
+      fillcolor: 'rgba(33,150,243,.13)', line: {width: 0}, layer: 'below'
+    }, {
+      // Danger band: open-ended upwards, so it is drawn to the top of the
+      // plot rather than to a fixed ceiling the curve might exceed.
+      type: 'rect', xref: 'paper', yref: 'y', x0: 0, x1: 1,
+      y0: d.danger_threshold, y1: yTop,
+      fillcolor: 'rgba(244,67,54,.10)', line: {width: 0}, layer: 'below'
     }, {
       type: 'line', xref: 'x', yref: 'paper',
       x0: new Date(d.now * 1000), x1: new Date(d.now * 1000), y0: 0, y1: 1,
       line: {color: '#e6e6e6', width: 1, dash: 'dot'}
+    }],
+    annotations: [{
+      xref: 'paper', yref: 'y', x: 0.995, xanchor: 'right',
+      y: (d.target_range.lower + d.target_range.upper) / 2, yanchor: 'middle',
+      text: `ideal ${Math.round(d.target_range.lower)}\u2013${Math.round(d.target_range.upper)}`,
+      showarrow: false,
+      font: {size: 9, color: 'rgba(33,150,243,.85)'}
+    }, {
+      xref: 'paper', yref: 'y', x: 0.995, xanchor: 'right',
+      y: d.danger_threshold, yanchor: 'bottom',
+      text: `danger >${Math.round(d.danger_threshold)}`, showarrow: false,
+      font: {size: 9, color: 'rgba(244,67,54,.85)'}
     }],
     legend: {orientation: 'h', y: 1.1, font: {size: 10}}
   }, {displayModeBar: false, responsive: true});

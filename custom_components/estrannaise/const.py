@@ -78,6 +78,16 @@ ATTR_USERS = "users"
 TARGET_RANGE_LOWER = 100  # pg/mL
 TARGET_RANGE_UPPER = 200  # pg/mL
 
+# Upper shaded band on the chart, matching the Lovelace card's
+# "Danger (>500 pg/mL)" in www/estrannaise-card.js. Deliberately far above the
+# target range rather than just past it: the guidance this range comes from
+# (WPATH SoC v8, 100-200 pg/mL) recommends aiming at the *upper* end and
+# tolerates exceeding it at peak, so a band starting at 201 would flag normal
+# post-injection peaks as alarming. Where "high" actually begins is a judgement
+# between a person and their prescriber; override per-install with
+# "danger_threshold" in config.json.
+DANGER_THRESHOLD = 500  # pg/mL
+
 # ── Unit conversions ─────────────────────────────────────────────────────────
 
 AVAILABLE_UNITS = {
